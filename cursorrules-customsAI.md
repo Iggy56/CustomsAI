@@ -58,10 +58,16 @@ Se uno di questi passaggi fallisce → il sistema non è pronto.
 - Supabase PostgreSQL + pgvector
 
 ### Modelli
-- Embeddings: `text-embedding-3-large`
-- LLM: GPT (configurabile)
+- Embeddings: `text-embedding-3-small` (predefinito; usare `text-embedding-3-large` solo se l’account OpenAI lo supporta)
+- LLM: GPT (configurabile via `LLM_MODEL` in .env)
+- Limite contesto: `MAX_CONTEXT_CHARS` in .env (default 30000), per evitare errori con contesti lunghi
 
 NON introdurre librerie aggiuntive.
+
+### Esecuzione
+- Da terminale: `python3 main.py "domanda"` (su macOS usare `python3`).
+- Variabili obbligatorie in .env: `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`.
+- Opzionali: `LLM_MODEL`, `TOP_K`, `MAX_CONTEXT_CHARS`.
 
 ---
 
@@ -121,7 +127,7 @@ Il codice NON deve assumere quale normativa sia presente.
 ## 6. Regole per il retrieval
 
 ### top_k iniziale
-5–10 risultati
+5–15 risultati (configurabile fino a 20)
 
 ### ordinamento
 per similarità vettoriale
@@ -130,6 +136,10 @@ per similarità vettoriale
 - testo chunk
 - articolo
 - fonte
+
+### contesto
+- Il totale dei caratteri del contesto non deve superare `MAX_CONTEXT_CHARS` (es. 30000).
+- Se il contesto supera il limite, il flusso si interrompe con messaggio chiaro.
 
 Se non vengono trovati risultati rilevanti:
 → il sistema deve informare l’utente.
@@ -195,6 +205,7 @@ NON deve:
 - type hints dove utili
 - gestione errori API e rete
 - output chiaro per debugging
+- in `main.py` le eccezioni OpenAI (`APIError`, `APIConnectionError`) devono essere importate (es. da `openai`) dove vengono usate nell’except
 
 ### Commenti
 
@@ -268,7 +279,7 @@ Gestire:
 * nessun risultato retrieval
 * errori API OpenAI
 * errori connessione Supabase
-* contesto troppo lungo
+* contesto troppo lungo (rispetto a `MAX_CONTEXT_CHARS`; aumentare il valore in .env o ridurre TOP_K se necessario)
 
 In caso di errore:
 stampare messaggio chiaro e interrompere il flusso.

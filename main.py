@@ -5,6 +5,8 @@ Generic over any normative content in chunks; no domain-specific logic.
 
 import sys
 
+from openai import APIError, APIConnectionError
+
 import config
 import embeddings
 import retrieval
