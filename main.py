@@ -21,11 +21,19 @@ from retrieval import ChunkRow
 
 def log_run(question: str, chunks: list[ChunkRow], context: str, answer: str) -> None:
     """Print debug info for retrieval and response quality."""
-    articles = [c.get("article_number") or "" for c in chunks if c.get("article_number")]
+    # Collect article/code from metadata when present (backward compatible)
+    refs = []
+    for c in chunks:
+        meta = c.get("metadata") or {}
+        if isinstance(meta, dict):
+            if meta.get("article") is not None:
+                refs.append(str(meta.get("article")))
+            elif meta.get("code") is not None:
+                refs.append(str(meta.get("code")))
     print("---")
     print("Domanda:", question[:200] + ("..." if len(question) > 200 else ""))
     print("Chunk recuperati:", len(chunks))
-    print("Articoli trovati:", articles if articles else "(nessuno)")
+    print("Articoli/code trovati:", refs if refs else "(nessuno)")
     print("Lunghezza contesto (caratteri):", len(context))
     print("---")
     print("Risposta:\n", answer)
@@ -57,9 +65,9 @@ def run(question: str) -> None:
         print("Errore durante la generazione dell'embedding:", e)
         sys.exit(1)
 
-    # 2) Vector search
+    # 2) Hybrid retrieval (structured by code if detected, else vector search)
     try:
-        chunks: list[ChunkRow] = retrieval.search_chunks(query_embedding)
+        chunks: list[ChunkRow] = retrieval.search_chunks(q, query_embedding)
     except ValueError as e:
         print("Errore configurazione Supabase:", e)
         sys.exit(1)
@@ -70,6 +78,19 @@ def run(question: str) -> None:
     if not chunks:
         print("Nessun risultato dal retrieval. L'informazione non è presente nel database.")
         sys.exit(0)
+
+    # Debug: type, celex, article/code, similarity per chunk
+    print("\nTop chunks:")
+    for i, chunk in enumerate(chunks):
+        meta = chunk.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        typ = meta.get("type", "N/A")
+        celex = meta.get("celex", "N/A")
+        art_or_code = meta.get("article") or meta.get("code") or "N/A"
+        print(f"\n[{i+1}] type={typ} | celex={celex} | article/code={art_or_code} | similarity={chunk.get('similarity', 'N/A')}")
+        chunk_text = chunk.get("chunk_text") or ""
+        print(f"Preview: {chunk_text[:200]}...")
 
     # 3) Context and length check
     context = prompt_module.format_context(chunks)

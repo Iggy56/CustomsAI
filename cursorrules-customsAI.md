@@ -33,12 +33,13 @@ Questa fase serve a VALIDARE il funzionamento, non a perfezionare il prodotto.
 Il sistema deve:
 
 1. generare embedding della domanda
-2. eseguire vector search su Supabase
-3. recuperare i chunk più rilevanti
-4. passare il contesto all’LLM
-5. generare risposta citata
-6. indicare chiaramente quando l’informazione non è presente
-7. stampare risultato leggibile
+2. **retrieval ibrido**: se la domanda contiene un codice normativo (es. 2B002), tentare prima il retrieval strutturato per `metadata.code`; altrimenti (o se nessun match) usare la vector search tramite RPC
+3. recuperare i chunk più rilevanti (con text, metadata, title, source_url, similarity)
+4. costruire il contesto con header metadata (TYPE, CELEX, Art, Code, Recital, ecc.) quando presenti
+5. passare il contesto all’LLM
+6. generare risposta citata
+7. indicare chiaramente quando l’informazione non è presente
+8. stampare risultato leggibile (inclusi type, celex, article/code, similarity in debug)
 
 Se uno di questi passaggi fallisce → il sistema non è pronto.
 
@@ -76,19 +77,23 @@ NON introdurre librerie aggiuntive.
 Pipeline:
 
 ```
-
 User Question
 ↓
-Embedding domanda
+Embedding domanda (sempre, per fallback)
 ↓
-Vector search (Supabase)
+Codice normativo in domanda? (regex es. 2B002)
+   Sì → Retrieval strutturato (metadata.code) su tabella chunks
+        → Se risultati: usa quelli (similarity=1.0)
+        → Se nessuno: fallback a vector search
+   No  → Vector search (RPC search_chunks)
 ↓
-Top chunks rilevanti
+Top chunks (text, metadata, title, source_url, similarity)
+↓
+Context builder con header metadata (TYPE, CELEX, Art, Code, Recital…)
 ↓
 LLM con contesto
 ↓
 Risposta citata o messaggio di assenza informazioni
-
 ```
 
 Separazione file:
@@ -112,13 +117,15 @@ Tabella Supabase: `chunks`
 
 Campi utilizzati:
 
-- chunk_text (text)
-- article_number (text)
-- title (text)
-- source_url (text)
-- embedding (vector)
+- `text` (text) – contenuto del chunk
+- `metadata` (jsonb) – struttura tipo: type, celex, article, paragraph, letter, annex, code (a seconda della normativa)
+- `title` (text)
+- `source_url` (text)
+- `embedding` (vector) – per la vector search
 
-NON modificare lo schema.
+L’app mappa in `ChunkRow`: chunk_text, metadata (dict), title, source_url, similarity.
+
+NON modificare lo schema del database.
 
 Il codice NON deve assumere quale normativa sia presente.
 
@@ -126,22 +133,25 @@ Il codice NON deve assumere quale normativa sia presente.
 
 ## 6. Regole per il retrieval
 
-### top_k iniziale
-5–15 risultati (configurabile fino a 20)
+### Retrieval ibrido
+- **Codice normativo in domanda** (pattern es. `[0-9][A-Z][0-9]{3}` tipo 2B002): prima retrieval strutturato su `metadata->>'code'` (select su tabella, senza RPC). Se ci sono risultati, restituirli (similarity=1.0). Altrimenti fallback a vector search.
+- **Nessun codice o nessun match strutturato**: usare RPC `search_chunks` (vector search) come prima.
+
+### top_k
+5–15 risultati (configurabile fino a 20), stesso limite per strutturato e vettoriale.
 
 ### ordinamento
-per similarità vettoriale
+- Strutturato: ordine naturale della select.
+- Vector search: per similarità vettoriale.
 
-### contesto restituito
-- testo chunk
-- articolo
-- fonte
+### formato restituito (sempre uguale)
+- chunk_text, metadata (dict), title, source_url, similarity (float o 1.0 per strutturato)
 
-### contesto
-- Il totale dei caratteri del contesto non deve superare `MAX_CONTEXT_CHARS` (es. 30000).
-- Se il contesto supera il limite, il flusso si interrompe con messaggio chiaro.
+### contesto per LLM
+- Header da metadata quando presenti (es. `[TYPE: article | CELEX: ... | Art: 12 | Code: 2B002]`), poi testo chunk e fonte.
+- Il totale caratteri non deve superare `MAX_CONTEXT_CHARS` (es. 30000). Se supera, messaggio chiaro e stop.
 
-Se non vengono trovati risultati rilevanti:
+Se non vengono trovati risultati:
 → il sistema deve informare l’utente.
 
 ---
@@ -246,12 +256,15 @@ Esempio:
 Stampare:
 
 * domanda utente
+* se rilevato codice normativo: `[hybrid] detected normative code: X`
+* se usato retrieval strutturato: `[structured retrieval] code=X -> N result(s)` oppure `no match, fallback to vector search`
+* per ogni chunk (debug): type, celex, article/code, similarity
 * numero chunk recuperati
-* articoli trovati
+* articoli/code trovati (da metadata)
 * lunghezza contesto
 * risposta finale
 
-Questo serve per valutare la qualità del retrieval e della risposta.
+Serve per valutare la qualità del retrieval (ibrido vs vettoriale) e della risposta.
 
 ---
 
