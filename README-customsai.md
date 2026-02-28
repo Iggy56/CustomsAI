@@ -5,7 +5,9 @@ Pipeline **RAG** (Retrieval-Augmented Generation) per interrogare normativa stru
 - Se la domanda contiene un **codice normativo** (es. 2B002 o 2b002; rilevamento **case-insensitive**, normalizzato in maiuscolo per il DB), il sistema tenta prima il retrieval strutturato per `metadata.code` sulla tabella `chunks`.
 - In assenza di codice o di risultati strutturati, viene usata la **ricerca vettoriale** (embedding + RPC su Supabase).
 
-Il contesto inviato all’LLM include **metadata** (tipo, CELEX, articolo, code, recital, ecc.) per citazioni precise. La risposta è basata **solo** sul contesto recuperato, con citazioni di articoli e fonti.
+Il contesto inviato all’LLM include **metadata** (tipo, CELEX, articolo, code, recital, ecc.) per citazioni precise. La risposta è basata **solo** sul contesto recuperato.
+
+**Due modalità di risposta LLM:** (1) **Codice diretto**: quando la domanda contiene un codice e il retrieval è strutturato, l’LLM riproduce fedelmente il testo normativo (niente sintesi né interpretazione). (2) **Domanda interpretativa**: per domande concettuali, risposta strutturata con sintesi e citazioni.
 
 Il sistema è **generico**: non dipende da una normativa specifica e funziona su qualsiasi contenuto normativo memorizzato in chunk nel database.
 
@@ -78,7 +80,7 @@ python3 main.py "Cosa prevede il codice 2B002?"
 python3 main.py "cosa dice il codice 2b002?"
 ```
 
-Il rilevamento del codice è **case-insensitive** (2b002 e 2B002 sono entrambi riconosciuti e normalizzati in maiuscolo). Con una domanda che contiene un codice il sistema esegue il retrieval strutturato su `metadata.code` e restituisce solo i chunk relativi a quel code. In output vedrai: domanda, eventuale codice rilevato, tipo di retrieval (strutturato o vettoriale), chunk con type/celex/article/code e similarity, lunghezza contesto e risposta (con citazioni). Se l’informazione non è nel database, il sistema lo segnala invece di inventare risposte.
+Il rilevamento del codice è **case-insensitive** (2b002 e 2B002 sono entrambi riconosciuti e normalizzati in maiuscolo). Con una domanda che contiene un codice il sistema esegue il retrieval strutturato su `metadata.code` e usa la modalità **codice diretto**: l’LLM trascrive il testo normativo senza sintetizzare. Per domande generiche (es. "quali obblighi…") si usa la modalità **interpretativa** (sintesi e citazioni). In output: domanda, codice rilevato (se presente), tipo di retrieval, chunk con type/celex/article/code e similarity, lunghezza contesto e risposta. Se l’informazione non è nel database, il sistema lo segnala invece di inventare risposte.
 
 ---
 
@@ -103,7 +105,7 @@ Il modello per gli **embedding** è impostato in `config.py` (`text-embedding-3-
 config.py         # Caricamento .env e costanti (modelli, TOP_K, limiti)
 embeddings.py     # Generazione embedding della domanda (OpenAI)
 retrieval.py      # Retrieval ibrido: rilevamento codice normativo, structured by metadata.code o vector search (RPC search_chunks)
-prompt.py         # Costruzione contesto con header metadata (TYPE, CELEX, Art, Code, …) e messaggi per l’LLM
+prompt.py         # Contesto con header metadata; due prompt: "codice diretto" (trascrizione fedele) e interpretativo (sintesi)
 llm.py            # Chiamata all’LLM per la risposta citata
 main.py           # Pipeline: domanda → embedding → retrieval ibrido → context → LLM → output
 supabase_rpc.sql  # Script per la funzione search_chunks (vector search) in Supabase

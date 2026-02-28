@@ -121,11 +121,12 @@ def search_chunks(
     query: str,
     query_embedding: list[float],
     top_k: int | None = None,
-) -> list[ChunkRow]:
+) -> tuple[list[ChunkRow], bool]:
     """
     Hybrid retrieval: if query contains a normative code (e.g. 2B002), try structured
     retrieval by metadata.code first; else or on no match, use vector search.
-    Return format is always: chunk_text, metadata, title, source_url, similarity.
+    Returns (chunks, used_structured_by_code). used_structured_by_code is True only
+    when we returned results from structured retrieval (so prompt can use "codice diretto" mode).
     """
     k = top_k if top_k is not None else config.TOP_K
     code = detect_normative_code(query)
@@ -135,11 +136,11 @@ def search_chunks(
         structured = _structured_retrieval_by_code(code, k)
         if structured:
             print(f"[structured retrieval] code={code} -> {len(structured)} result(s)")
-            return structured
+            return (structured, True)
         print("[structured retrieval] no match, fallback to vector search")
 
     # No code detected or no structured results: normal vector search
-    return _vector_search(query_embedding, k)
+    return (_vector_search(query_embedding, k), False)
 
 
 def _log_chunk_metadata(chunk: ChunkRow) -> None:

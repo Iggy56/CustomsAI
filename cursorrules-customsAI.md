@@ -87,11 +87,13 @@ Codice normativo in domanda? (regex case-insensitive, es. 2B002 / 2b002)
         → Se nessuno: fallback a vector search
    No  → Vector search (RPC search_chunks)
 ↓
-Top chunks (text, metadata, title, source_url, similarity)
+Top chunks (text, metadata, title, source_url, similarity) + flag used_structured_by_code
 ↓
 Context builder con header metadata (TYPE, CELEX, Art, Code, Recital…)
 ↓
-LLM con contesto
+LLM: scelta prompt in base a used_structured_by_code
+   Sì (retrieval strutturato per codice) → modalità "codice diretto": riproduzione fedele del testo, niente sintesi/interpretazione
+   No  → modalità "domanda interpretativa": risposta strutturata, sintesi, citazioni
 ↓
 Risposta citata o messaggio di assenza informazioni
 ```
@@ -156,48 +158,36 @@ Se non vengono trovati risultati:
 
 ---
 
-## 7. Prompt LLM obbligatorio
+## 7. Prompt LLM: due modalità
 
-Il modello DEVE:
+Il modello DEVE sempre usare solo il contesto fornito, non inventare, non usare conoscenza esterna. La **modalità** dipende dal tipo di retrieval.
 
-- usare solo il contesto fornito
-- non inventare informazioni
-- non usare conoscenza esterna
-- citare articoli quando disponibili
-- dichiarare quando l’informazione non è presente
+### Modalità "Codice diretto" (quando retrieval strutturato per codice)
 
-### Template
+Se la domanda contiene un codice normativo e il retrieval ha restituito risultati strutturati (`used_structured_by_code = True`):
 
-```
+- **Risposta = riproduzione fedele** del testo normativo presente nel contesto.
+- NON sintetizzare, NON riformulare, NON interpretare.
+- NON aggiungere elenchi (a, b, c) o struttura non presente nel testo.
+- Eventuale citazione CELEX una sola volta; nessuna sezione aggiuntiva (es. "Note o eccezioni") se non nel contesto.
+- Se il contesto è vuoto o non pertinente: solo "Informazione non presente nel contesto fornito."
 
-Usa esclusivamente le informazioni presenti nel CONTESTO.
+### Modalità "Domanda interpretativa" (vector search o fallback)
 
-Se la risposta non è presente, scrivi:
-"Informazione non presente nel contesto fornito."
+Per domande concettuali (es. "quali sono gli obblighi…"):
 
-Fornisci:
-
-1. Risposta sintetica
-2. Articoli rilevanti (se presenti)
-3. Ambito di applicazione (se disponibile)
-4. Note o eccezioni (se presenti)
-
-Cita sempre gli articoli quando disponibili.
-
-````
+- Risposta strutturata: sintesi, articoli rilevanti, ambito, note/eccezioni se presenti.
+- Citare articoli quando disponibili.
+- Dichiarare assenza solo se l’informazione non è nel contesto.
 
 ---
 
 ## 8. Regole per la generazione della risposta
 
-La risposta deve:
+- **Modalità codice diretto**: risposta = testo normativo trascritto fedelmente; niente sintesi, niente sezioni inventate.
+- **Modalità interpretativa**: risposta sintetica e chiara, citazioni articoli, ambito/note se presenti.
 
-- essere sintetica e chiara
-- citare articoli quando disponibili
-- indicare se l’informazione è incompleta
-- dichiarare quando non è presente nel contesto
-
-NON deve:
+In entrambe le modalità NON deve:
 
 - interpretare oltre il contesto
 - fare deduzioni legali

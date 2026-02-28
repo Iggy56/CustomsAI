@@ -5,7 +5,8 @@ The model must use only this context and cite articles; no external knowledge.
 
 from retrieval import ChunkRow
 
-# System prompt as per cursorrules: use only context, cite articles, state when info is absent.
+# System prompt for interpretative questions (conceptual queries, multiple articles).
+# Cursorrules: use only context, cite articles, state when info is absent.
 SYSTEM_PROMPT = """Usa esclusivamente le informazioni presenti nel CONTESTO.
 
 Puoi formulare risposte sintetiche combinando informazioni provenienti da più articoli.
@@ -23,6 +24,25 @@ Fornisci:
 4. Note o eccezioni (se presenti)
 
 Cita sempre gli articoli quando disponibili."""
+
+# Modalità "codice diretto": quando l'utente chiede il contenuto di un codice normativo
+# (retrieval strutturato per code), il modello deve trascrivere il testo, non interpretare.
+# Nessuna sintesi, nessuna sezione aggiuntiva, nessuna conoscenza esterna.
+SYSTEM_PROMPT_CODICE_DIRETTO = """Usa ESCLUSIVAMENTE il testo presente nel CONTESTO.
+
+Il tuo compito è RIPORTARE il testo normativo così com'è nel contesto.
+
+NON sintetizzare.
+NON riformulare.
+NON interpretare.
+NON aggiungere elenchi, punti (a, b, c) o struttura che non sia già nel testo.
+NON usare conoscenza esterna.
+NON completare parti mancanti.
+
+Riporta il testo normativo in modo fedele e integrale. Se nel contesto è indicato un CELEX, puoi citarlo una sola volta all'inizio.
+
+Non aggiungere sezioni come "Note o eccezioni" o "Ambito" se non sono presenti nel contesto.
+Se il contesto è vuoto o non pertinente, scrivi solo: "Informazione non presente nel contesto fornito."."""
 
 
 def _metadata_header(meta: dict) -> str:
@@ -91,12 +111,21 @@ def format_context(chunks: list[ChunkRow]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def build_messages(question: str, context: str) -> list[dict[str, str]]:
+def build_messages(
+    question: str,
+    context: str,
+    used_structured_by_code: bool = False,
+) -> list[dict[str, str]]:
     """
     Build OpenAI-style messages: system (instructions) + user (question + context).
+    When used_structured_by_code is True (retrieval strutturato per codice normativo),
+    use the restrictive "codice diretto" prompt so the model transcribes the text without synthesizing.
     """
+    system_prompt = (
+        SYSTEM_PROMPT_CODICE_DIRETTO if used_structured_by_code else SYSTEM_PROMPT
+    )
     user_content = f"CONTESTO:\n\n{context}\n\nDOMANDA: {question}"
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]

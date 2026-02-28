@@ -67,7 +67,7 @@ def run(question: str) -> None:
 
     # 2) Hybrid retrieval (structured by code if detected, else vector search)
     try:
-        chunks: list[ChunkRow] = retrieval.search_chunks(q, query_embedding)
+        chunks, used_structured_by_code = retrieval.search_chunks(q, query_embedding)
     except ValueError as e:
         print("Errore configurazione Supabase:", e)
         sys.exit(1)
@@ -101,9 +101,9 @@ def run(question: str) -> None:
         )
         sys.exit(1)
 
-    # 4) LLM
+    # 4) LLM (modalità "codice diretto" se retrieval strutturato per code, altrimenti interpretativa)
     try:
-        answer = llm.generate_answer(q, context)
+        answer = llm.generate_answer(q, context, used_structured_by_code=used_structured_by_code)
     except (APIError, APIConnectionError) as e:
         print("Errore API OpenAI:", e)
         sys.exit(1)
