@@ -2,7 +2,7 @@
 
 Pipeline **RAG** (Retrieval-Augmented Generation) per interrogare normativa strutturata con **retrieval ibrido** (strutturato + semantico):
 
-- Se la domanda contiene un **codice normativo** (es. 2B002), il sistema tenta prima il retrieval strutturato per `metadata.code` sulla tabella `chunks`.
+- Se la domanda contiene un **codice normativo** (es. 2B002 o 2b002; rilevamento **case-insensitive**, normalizzato in maiuscolo per il DB), il sistema tenta prima il retrieval strutturato per `metadata.code` sulla tabella `chunks`.
 - In assenza di codice o di risultati strutturati, viene usata la **ricerca vettoriale** (embedding + RPC su Supabase).
 
 Il contesto inviato all’LLM include **metadata** (tipo, CELEX, articolo, code, recital, ecc.) per citazioni precise. La risposta è basata **solo** sul contesto recuperato, con citazioni di articoli e fonti.
@@ -55,7 +55,7 @@ Il sistema è **generico**: non dipende da una normativa specifica e funziona su
   In `metadata` possono essere presenti, a seconda della normativa: `type`, `celex`, `article`, `paragraph`, `letter`, `annex`, `code`, ecc.
 - La **ricerca vettoriale** usa la funzione RPC **`search_chunks`**, che restituisce `text`, `metadata`, `title`, `source_url`, `similarity`.  
   Esegui lo script SQL nel progetto: apri **Supabase → SQL Editor** e lancia il contenuto di `supabase_rpc.sql`.
-- Il **retrieval strutturato** (quando la domanda contiene un codice tipo 2B002) interroga direttamente la tabella con filtro `metadata->>'code' = codice`; non usa la RPC.
+- Il **retrieval strutturato** (quando la domanda contiene un codice tipo 2B002 o 2b002; rilevamento case-insensitive) interroga direttamente la tabella con filtro `metadata->>'code' = codice` (codice normalizzato in maiuscolo); non usa la RPC.
 
 **Dimensioni del vettore:**  
 Lo script prevede `vector(3072)` per `text-embedding-3-large`. Se usi **`text-embedding-3-small`** (predefinito), la dimensione è **1536**: adatta in `supabase_rpc.sql` e nella definizione della colonna `embedding` a `vector(1536)`.
@@ -75,9 +75,10 @@ Esempi:
 ```bash
 python3 main.py "Quali sono gli obblighi per l'importazione?"
 python3 main.py "Cosa prevede il codice 2B002?"
+python3 main.py "cosa dice il codice 2b002?"
 ```
 
-Con una domanda tipo "codice 2B002" il sistema rileva il codice, esegue il retrieval strutturato su `metadata.code` e restituisce solo i chunk relativi a quel code. In output vedrai: domanda, eventuale codice rilevato, tipo di retrieval (strutturato o vettoriale), chunk con type/celex/article/code e similarity, lunghezza contesto e risposta (con citazioni). Se l’informazione non è nel database, il sistema lo segnala invece di inventare risposte.
+Il rilevamento del codice è **case-insensitive** (2b002 e 2B002 sono entrambi riconosciuti e normalizzati in maiuscolo). Con una domanda che contiene un codice il sistema esegue il retrieval strutturato su `metadata.code` e restituisce solo i chunk relativi a quel code. In output vedrai: domanda, eventuale codice rilevato, tipo di retrieval (strutturato o vettoriale), chunk con type/celex/article/code e similarity, lunghezza contesto e risposta (con citazioni). Se l’informazione non è nel database, il sistema lo segnala invece di inventare risposte.
 
 ---
 

@@ -81,7 +81,7 @@ User Question
 ↓
 Embedding domanda (sempre, per fallback)
 ↓
-Codice normativo in domanda? (regex es. 2B002)
+Codice normativo in domanda? (regex case-insensitive, es. 2B002 / 2b002)
    Sì → Retrieval strutturato (metadata.code) su tabella chunks
         → Se risultati: usa quelli (similarity=1.0)
         → Se nessuno: fallback a vector search
@@ -134,7 +134,7 @@ Il codice NON deve assumere quale normativa sia presente.
 ## 6. Regole per il retrieval
 
 ### Retrieval ibrido
-- **Codice normativo in domanda** (pattern es. `[0-9][A-Z][0-9]{3}` tipo 2B002): prima retrieval strutturato su `metadata->>'code'` (select su tabella, senza RPC). Se ci sono risultati, restituirli (similarity=1.0). Altrimenti fallback a vector search.
+- **Codice normativo in domanda** (pattern `[0-9][A-Za-z][0-9]{3}`, case-insensitive, es. 2B002, 2b002, "codice 2b002", "(2b002)"): il codice rilevato viene normalizzato in maiuscolo per il lookup. Prima retrieval strutturato su `metadata->>'code'` (select su tabella, senza RPC). Se ci sono risultati, restituirli (similarity=1.0). Altrimenti fallback a vector search.
 - **Nessun codice o nessun match strutturato**: usare RPC `search_chunks` (vector search) come prima.
 
 ### top_k

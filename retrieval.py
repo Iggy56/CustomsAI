@@ -14,8 +14,9 @@ import config
 # Type for a single chunk row: metadata is optional dict from jsonb.
 ChunkRow = dict[str, str | None | float | dict | list]
 
-# Normative code pattern: digit, letter, three digits (e.g. 2B002).
-NORMATIVE_CODE_PATTERN = re.compile(r"\b[0-9][A-Z][0-9]{3}\b")
+# Normative code pattern: digit, letter (case-insensitive), three digits (e.g. 2B002, 2b002).
+# IGNORECASE ensures "2b002" and "codice 2b002" are detected; we normalize to uppercase for DB lookup.
+NORMATIVE_CODE_PATTERN = re.compile(r"\b[0-9][A-Za-z][0-9]{3}\b", re.IGNORECASE)
 
 
 def _get_client() -> Client:
@@ -29,13 +30,18 @@ def _get_client() -> Client:
 
 def detect_normative_code(query: str) -> Optional[str]:
     """
-    Detect a normative code in the user query (e.g. 2B002).
-    Returns uppercase match if found, else None. Used for hybrid structured retrieval.
+    Detect a normative code in the user query (e.g. 2B002, 2b002, "codice 2b002", "(2b002)").
+    Case-insensitive: matches 2b002 and 2B002. Returns normalized uppercase code for DB lookup.
+    Stripping ensures robustness against surrounding spaces or punctuation in the match.
     """
     if not query or not query.strip():
         return None
     m = NORMATIVE_CODE_PATTERN.search(query.strip())
-    return m.group(0).upper() if m else None
+    if not m:
+        return None
+    # Normalize to uppercase for metadata.code lookup; strip spaces/punctuation for robustness.
+    raw = m.group(0).strip()
+    return raw.upper() if raw else None
 
 
 def _parse_metadata(raw: object) -> dict:
