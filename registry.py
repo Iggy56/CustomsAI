@@ -1,0 +1,82 @@
+"""
+CustomsAI – Registry dei DB collaterali (v3)
+
+Questo è l'UNICO punto di configurazione per i DB collaterali.
+
+Aggiungere un nuovo DB = aggiungere una entry in REGISTRY.
+Nessun altro file deve essere modificato.
+
+Struttura di ogni entry:
+    id          – identificatore univoco
+    table       – nome tabella Supabase
+    code_field  – campo su cui fare il lookup
+    text_field  – campo testo da restituire
+    pattern     – regex per riconoscere il codice nell'input utente
+    label       – etichetta human-readable
+    match_mode  – "exact" | "prefix"
+    source      – configurazione fonte:
+                    {"type": "celex_field"}               → CELEX letto dalla riga
+                    {"type": "static_celex", "celex": …}  → CELEX fisso
+"""
+
+import re
+
+REGISTRY: list[dict] = [
+    {
+        "id": "dual_use",
+        "table": "dual_use_items",
+        "code_field": "code",
+        "text_field": "description",
+        "pattern": r"\b[0-9][A-Z][0-9]{3}\b",
+        "label": "Bene a duplice uso",
+        "match_mode": "exact",
+        "source": {
+            "type": "celex_field",
+        },
+    },
+    {
+        "id": "nomenclature",
+        "table": "nomenclature",
+        "code_field": "goods_code",
+        "text_field": "description",
+        "pattern": r"\b\d{4,10}\b",
+        "label": "Nomenclatura Combinata",
+        "match_mode": "prefix",
+        # display_code_field: se presente, il chunk_text include il codice e l'indentazione
+        # gerarchica (basata sul campo "indent": null=voce, "-"=livello 1, "- -"=livello 2, ecc.)
+        # Il valore del campo ha formato "{10 cifre} {2 cifre}" → viene estratta solo la parte numerica.
+        "display_code_field": "goods_code",
+        "source": {
+            "type": "static_celex",
+            "celex": "31987R2658",
+            "url": "https://eur-lex.europa.eu/legal-content/IT/ALL/?uri=celex:31987R2658",
+            "label": "Nomenclatura Combinata (Reg. CEE 2658/87)",
+        },
+    },
+]
+
+# Pre-compile patterns in registry order (IGNORECASE per tollerare input minuscolo).
+# L'ordine è significativo: il primo match vince.
+_COMPILED: list[tuple[dict, re.Pattern]] = [
+    (entry, re.compile(entry["pattern"], re.IGNORECASE))
+    for entry in REGISTRY
+]
+
+
+def detect_code_from_registry(query: str) -> tuple[dict | None, str | None]:
+    """
+    Scansiona i pattern del registry nell'ordine in cui sono definiti.
+    Restituisce (entry, codice_normalizzato) per il primo match, oppure (None, None).
+
+    Il codice è normalizzato in uppercase per garantire consistenza nei lookup.
+    """
+    if not query:
+        return None, None
+
+    for entry, pattern in _COMPILED:
+        match = pattern.search(query)
+        if match:
+            code = match.group(0).upper()
+            return entry, code
+
+    return None, None

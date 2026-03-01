@@ -1,115 +1,193 @@
 # CustomsAI
 
-Pipeline **RAG** (Retrieval-Augmented Generation) per interrogare normativa strutturata con **retrieval ibrido** (strutturato + semantico):
+Motore normativo **AI-first** per interrogare normativa strutturata e sistemi di classificazione doganale.
+Il sistema è deterministico, tracciabile e auditabile: nessun routing basato su LLM, nessuna fonte generata dall'AI.
 
-- Se la domanda contiene un **codice normativo** (es. 2B002 o 2b002; rilevamento **case-insensitive**, normalizzato in maiuscolo per il DB), il sistema tenta prima il retrieval strutturato per `metadata.code` sulla tabella `chunks`.
-- In assenza di codice o di risultati strutturati, viene usata la **ricerca vettoriale** (embedding + RPC su Supabase).
+---
 
-Il contesto inviato all’LLM include **metadata** (tipo, CELEX, articolo, code, recital, ecc.) per citazioni precise. La risposta è basata **solo** sul contesto recuperato.
+## Come funziona
 
-**Due modalità di risposta LLM:** (1) **Codice diretto**: quando la domanda contiene un codice e il retrieval è strutturato, l’LLM riproduce fedelmente il testo normativo (niente sintesi né interpretazione). (2) **Domanda interpretativa**: per domande concettuali, risposta strutturata con sintesi e citazioni.
+```
+Domanda
+  │
+  ├─ detect_intent()          → codice_diretto | procedurale | classificazione | generico
+  ├─ detect_code_from_registry() → (entry, codice) dal registry config-driven
+  │
+  ├─ CODE_SPECIFIC → lookup_collateral() → output diretto (nessun LLM)
+  ├─ PROCEDURAL   → lookup_collateral() + vector_search() → LLM
+  └─ GENERIC/CLASS → vector_search() → LLM
+       │
+       └─ Fonti stampate da Python (deterministicamente)
+```
 
-Il sistema è **generico**: non dipende da una normativa specifica e funziona su qualsiasi contenuto normativo memorizzato in chunk nel database.
+**Registry-first**: ogni DB collaterale è definito in `registry.py`.
+Aggiungere un nuovo database significa aggiungere una voce al registry — nessun'altra modifica al codice.
 
 ---
 
 ## Requisiti
 
-- **Python 3.11+**
-- Account **OpenAI** (API key)
-- Progetto **Supabase** con PostgreSQL e pgvector
+- Python 3.11+
+- Account OpenAI (API key)
+- Progetto Supabase con PostgreSQL + pgvector
 
 ---
 
 ## Installazione
 
-1. Clona o scarica il progetto e entra nella cartella.
+```bash
+# 1. Crea ambiente virtuale
+python3 -m venv .venv
+source .venv/bin/activate   # macOS/Linux
 
-2. Crea un ambiente virtuale (consigliato):
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate   # Linux/macOS
-   ```
+# 2. Installa dipendenze
+pip install -r requirements.txt
 
-3. Installa le dipendenze:
-   ```bash
-   pip install -r requirements.txt
-   ```
+# 3. Configura variabili d'ambiente
+cp .env.example .env
+```
 
-4. Configura le variabili d’ambiente. Copia `.env.example` in `.env` e compila:
-   ```bash
-   cp .env.example .env
-   ```
-   In `.env` imposta almeno:
-   - `OPENAI_API_KEY` – chiave API OpenAI
-   - `SUPABASE_URL` – URL del progetto Supabase
-   - `SUPABASE_SERVICE_KEY` – service key Supabase (necessaria per la RPC)
+Variabili in `.env`:
 
-   Opzionali: `LLM_MODEL`, `TOP_K`, `MAX_CONTEXT_CHARS` (vedi sotto).
+| Variabile | Obbligatoria | Default | Descrizione |
+|-----------|:---:|---------|-------------|
+| `OPENAI_API_KEY` | Sì | — | Chiave API OpenAI |
+| `SUPABASE_URL` | Sì | — | URL progetto Supabase |
+| `SUPABASE_SERVICE_KEY` | Sì | — | Service key Supabase |
+| `LLM_MODEL` | No | `gpt-4o-mini` | Modello chat |
+| `TOP_K` | No | `15` | Chunk da recuperare (5–20) |
+| `MAX_CONTEXT_CHARS` | No | `30000` | Limite contesto inviato all'LLM |
+
+Il modello di embedding è configurato in `config.py` (`text-embedding-3-small`, vector 1536).
 
 ---
 
-## Supabase
+## Setup Supabase
 
-### Tabella e funzione RPC
+### 1. Funzioni RPC principali
 
-- La tabella **`chunks`** deve avere: `text`, `metadata` (jsonb), `title`, `source_url`, `embedding` (tipo `vector`).  
-  In `metadata` possono essere presenti, a seconda della normativa: `type`, `celex`, `article`, `paragraph`, `letter`, `annex`, `code`, ecc.
-- La **ricerca vettoriale** usa la funzione RPC **`search_chunks`**, che restituisce `text`, `metadata`, `title`, `source_url`, `similarity`.  
-  Esegui lo script SQL nel progetto: apri **Supabase → SQL Editor** e lancia il contenuto di `supabase_rpc.sql`.
-- Il **retrieval strutturato** (quando la domanda contiene un codice tipo 2B002 o 2b002; rilevamento case-insensitive) interroga direttamente la tabella con filtro `metadata->>'code' = codice` (codice normalizzato in maiuscolo); non usa la RPC.
+Esegui `supabase_rpc.sql` nel SQL Editor di Supabase.
+Crea la funzione `search_chunks_multi_type(query_embedding vector(1536), match_count int, type_filters text[])` per la ricerca vettoriale con filtro per tipo di chunk.
 
-**Dimensioni del vettore:**  
-Lo script prevede `vector(3072)` per `text-embedding-3-large`. Se usi **`text-embedding-3-small`** (predefinito), la dimensione è **1536**: adatta in `supabase_rpc.sql` e nella definizione della colonna `embedding` a `vector(1536)`.
+### 2. Funzioni di catalogo (per lo scanner)
+
+Esegui `tools/catalog.sql` nel SQL Editor di Supabase.
+Crea tre funzioni di introspezione:
+- `list_public_tables()` — tabelle pubbliche con stima righe
+- `get_table_columns(p_table)` — colonne con tipo e nullability
+- `sample_column_values(p_table, p_col, p_limit)` — valori distinti da una colonna
 
 ---
 
 ## Utilizzo
 
-Da terminale, dalla root del progetto:
+### Query normativa
 
 ```bash
-python3 main.py "La tua domanda sulla normativa"
-```
-
-Esempi:
-
-```bash
-python3 main.py "Quali sono gli obblighi per l'importazione?"
 python3 main.py "Cosa prevede il codice 2B002?"
-python3 main.py "cosa dice il codice 2b002?"
+python3 main.py "Quali obblighi per esportare apparecchiature laser?"
+python3 main.py "Voce doganale 8544"
 ```
 
-Il rilevamento del codice è **case-insensitive** (2b002 e 2B002 sono entrambi riconosciuti e normalizzati in maiuscolo). Con una domanda che contiene un codice il sistema esegue il retrieval strutturato su `metadata.code` e usa la modalità **codice diretto**: l’LLM trascrive il testo normativo senza sintetizzare. Per domande generiche (es. "quali obblighi…") si usa la modalità **interpretativa** (sintesi e citazioni). In output: domanda, codice rilevato (se presente), tipo di retrieval, chunk con type/celex/article/code e similarity, lunghezza contesto e risposta. Se l’informazione non è nel database, il sistema lo segnala invece di inventare risposte.
+Il rilevamento del codice è **case-insensitive** (2b002 → normalizzato 2B002).
 
----
+**Quattro modalità di risposta:**
 
-## Configurazione (.env)
+| Intent | Trigger | Comportamento |
+|--------|---------|---------------|
+| `CODE_SPECIFIC` | Codice nel registry + nessun trigger procedurale | Trascrizione diretta, nessun LLM |
+| `PROCEDURAL` | Parole chiave: esportare, obblighi, autorizzazione… | LLM con contesto collaterale + vettoriale |
+| `CLASSIFICATION` | Parole chiave: classificazione, voce doganale… | LLM con filtro `ANNEX_CODE` |
+| `GENERIC` | Default | LLM con ricerca vettoriale |
 
-| Variabile | Obbligatoria | Default | Descrizione |
-|-----------|--------------|---------|-------------|
-| `OPENAI_API_KEY` | Sì | — | Chiave API OpenAI |
-| `SUPABASE_URL` | Sì | — | URL progetto Supabase |
-| `SUPABASE_SERVICE_KEY` | Sì | — | Service key Supabase |
-| `LLM_MODEL` | No | `gpt-4o-mini` | Modello chat (es. `gpt-4o`) |
-| `TOP_K` | No | `15` | Numero di chunk da recuperare (5–20) |
-| `MAX_CONTEXT_CHARS` | No | `30000` | Limite caratteri del contesto inviato all’LLM |
+### Scanner automatico
 
-Il modello per gli **embedding** è impostato in `config.py` (`text-embedding-3-small`).
+Lo scanner analizza il database Supabase, valida le entry del registry e profila le tabelle non ancora registrate.
+
+```bash
+# Scan completo con report testuale
+python3 tools/scan_db.py
+
+# Report JSON (per integrazione/automazione)
+python3 tools/scan_db.py --json
+
+# Salva report su file
+python3 tools/scan_db.py --output report.json --json
+
+# Solo validazione registry (no profiling nuove tabelle)
+python3 tools/scan_db.py --check-only
+
+# Escludi tabelle
+python3 tools/scan_db.py --skip-tables log_table,temp_data
+```
+
+Il report include:
+- Validazione di ogni entry del registry (6 check: tabella esistente, campi presenti, dati, copertura pattern ≥80%, lookup campione, coerenza source)
+- Profiling delle tabelle non registrate con rilevamento automatico del pattern e draft entry pronto per `registry.py`
 
 ---
 
 ## Struttura del progetto
 
 ```
-config.py         # Caricamento .env e costanti (modelli, TOP_K, limiti)
-embeddings.py     # Generazione embedding della domanda (OpenAI)
-retrieval.py      # Retrieval ibrido: rilevamento codice normativo, structured by metadata.code o vector search (RPC search_chunks)
-prompt.py         # Contesto con header metadata; due prompt: "codice diretto" (trascrizione fedele) e interpretativo (sintesi)
-llm.py            # Chiamata all’LLM per la risposta citata
-main.py           # Pipeline: domanda → embedding → retrieval ibrido → context → LLM → output
-supabase_rpc.sql  # Script per la funzione search_chunks (vector search) in Supabase
+registry.py           # Config-driven: REGISTRY list + detect_code_from_registry()
+main.py               # Pipeline orchestratore
+config.py             # Variabili env e costanti
+embeddings.py         # Generazione embedding (OpenAI)
+retrieval.py          # Retrieval: detect_intent, lookup_collateral, vector_search
+prompt.py             # Context builder + prompt LLM
+llm.py                # Chiamata LLM
+query_normalizer.py   # Normalizzazione query
+
+supabase_rpc.sql      # Funzione search_chunks_multi_type per Supabase
+
+tools/
+  scan_db.py          # Scanner automatico DB
+  catalog.sql         # Funzioni RPC di introspezione per Supabase
+
+tests/
+  test_registry.py    # Unit test registry.py
+  test_intent.py      # Unit test detect_intent()
+  test_sources.py     # Unit test _print_normative_sources()
+  test_retrieval.py   # Test retrieval con mock Supabase
+  test_pipeline.py    # Test pipeline end-to-end con mock
+  test_scan_db.py     # Unit test scan_db.py (funzioni pure)
 ```
+
+---
+
+## DB collaterali registrati
+
+| ID | Tabella | Pattern | Fonte |
+|----|---------|---------|-------|
+| `dual_use` | `dual_use_items` | `[0-9][A-Z][0-9]{3}` (es. 2B002) | CELEX dal campo DB |
+| `nomenclature` | `nomenclature` | `\d{4,10}` (es. 8544) | Reg. CEE 2658/87 (statico) |
+
+Per aggiungere un nuovo DB: aggiungi una voce a `REGISTRY` in `registry.py`. Nessun'altra modifica necessaria.
+
+---
+
+## Test
+
+```bash
+python3 -m pytest tests/ -v
+```
+
+118 test distribuiti su 3 livelli:
+- **L1** — funzioni pure, nessuna dipendenza esterna
+- **L2** — mock Supabase client
+- **L3** — pipeline end-to-end con mock completo
+
+---
+
+## Aggiungere un nuovo database
+
+1. Carica i dati in Supabase (tabella nello schema `public`)
+2. Esegui `python3 tools/scan_db.py` per profilare la tabella
+3. Copia il draft entry generato dallo scanner
+4. Incollalo in `REGISTRY` in `registry.py` e completa i campi `???`
+5. Esegui i test: `python3 -m pytest tests/ -v`
+6. Verifica live: `python3 main.py "domanda con il nuovo codice"`
 
 ---
 

@@ -1,67 +1,100 @@
 """
-CustomsAI – Intent-aware main
-with deterministic query normalization layer
+CustomsAI v3 – Pipeline registry-first
+
+Flusso:
+  detect_intent (keyword) + detect_code_from_registry (pattern)
+    → CODE_SPECIFIC  : lookup collaterale → testo diretto, nessun LLM
+    → PROCEDURAL+code: lookup collaterale + vector_search → LLM interpretativo
+    → CLASSIFICATION : vector_search (ANNEX_CODE) → LLM interpretativo
+    → GENERIC        : vector_search globale → LLM interpretativo
+
+Le fonti normative sono sempre stampate da Python, mai dall'LLM.
 """
 
 import sys
-import re
 
 from openai import APIError, APIConnectionError
 
+import config
 import embeddings
 import retrieval
 import prompt as prompt_module
 import llm
 from query_normalizer import normalize_query
+from registry import detect_code_from_registry
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Source printing (deterministico)
 # ---------------------------------------------------------------------------
 
-def contains_specific_reference(query: str) -> bool:
-    if not query:
-        return False
-
-    if re.search(r"\b[0-9][A-Za-z][0-9]{3}\b", query):
-        return True
-
-    if re.search(r"\b\d{4,10}\b", query):
-        return True
-
-    return False
-
-
-def extract_celex_from_chunks(chunks: list[dict]) -> list[str]:
-    celex_set = set()
-
-    for c in chunks:
-        celex = c.get("celex_consolidated")
-        if celex:
-            celex_set.add(str(celex))
-
-    return sorted(celex_set)
-
-
-def eurlex_link(celex: str) -> str:
+def _eurlex_link(celex: str) -> str:
     return f"https://eur-lex.europa.eu/legal-content/IT/TXT/?uri=CELEX:{celex}"
 
 
-def print_normative_sources(chunks: list[dict]) -> None:
-    celex_list = extract_celex_from_chunks(chunks)
+def _print_normative_sources(
+    chunks: list[dict],
+    registry_entry: dict | None,
+) -> None:
+    """
+    Stampa le fonti normative in modo deterministico.
 
-    if not celex_list:
+    Due tipi di fonte (non esclusivi):
+      - static_celex : CELEX fisso letto dall'entry del registry (es. nomenclature)
+      - celex_field  : CELEX dinamico letto dal campo celex_consolidated dei chunk
+    """
+    lines: list[str] = []
+
+    # 1. Fonte statica dal registry (es. nomenclature)
+    if registry_entry:
+        src = registry_entry.get("source", {})
+        if src.get("type") == "static_celex":
+            if src.get("label"):
+                lines.append(src["label"])
+            lines.append(f"CELEX: {src['celex']}")
+            lines.append(src["url"])
+            lines.append("")
+
+    # 2. CELEX dinamici dai chunk (celex_field)
+    seen: set[str] = set()
+    for c in chunks:
+        celex = c.get("celex_consolidated")
+        if celex and celex not in seen:
+            seen.add(celex)
+            lines.append(f"CELEX: {celex}")
+            lines.append(_eurlex_link(celex))
+            lines.append("")
+
+    if not lines:
         return
 
     print("\n---")
     print("FONTI NORMATIVE (deterministiche)\n")
-
-    for celex in celex_list:
-        print(f"CELEX: {celex}")
-        print(eurlex_link(celex))
-        print()
-
+    print("\n".join(lines))
     print("---")
+
+
+# ---------------------------------------------------------------------------
+# Display helpers
+# ---------------------------------------------------------------------------
+
+def _display_direct_text(chunks: list[dict]) -> None:
+    print("\n=== TESTO NORMATIVO ===\n")
+    for r in chunks:
+        print(r.get("chunk_text", ""))
+        print("\n---")
+
+
+def _run_llm_and_print(
+    question: str,
+    chunks: list[dict],
+    registry_entry: dict | None,
+) -> None:
+    context = prompt_module.format_context(chunks)
+    answer = llm.generate_answer(question, context, used_structured_by_code=False)
+    print("\n=== RISPOSTA ===\n")
+    print(answer)
+    _print_normative_sources(chunks, registry_entry)
 
 
 # ---------------------------------------------------------------------------
@@ -69,87 +102,101 @@ def print_normative_sources(chunks: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def run(question: str) -> None:
-
     q = (question or "").strip()
     if not q:
         print("Errore: domanda vuota.")
         sys.exit(1)
 
-    # Detect intent early (deterministic)
-    intent = retrieval.detect_intent(q)
+    # ── 1. Intent (keyword) + codice (registry pattern scan) ──────────────
+    base_intent    = retrieval.detect_intent(q)
+    registry_entry, code = detect_code_from_registry(q)
 
-    # Normalize only for embedding generation
+    # ── 2. Intent finale ───────────────────────────────────────────────────
+    # Se c'è un codice e l'intent non è procedurale → CODE_SPECIFIC
+    if registry_entry:
+        intent = (
+            base_intent
+            if base_intent == retrieval.Intent.PROCEDURAL
+            else retrieval.Intent.CODE_SPECIFIC
+        )
+    else:
+        intent = base_intent
+
+    print(
+        f"[routing] intent={intent.value} | "
+        f"code={code} | "
+        f"db={registry_entry['id'] if registry_entry else '-'}"
+    )
+
+    # ── 3. CODE_SPECIFIC: lookup collaterale, nessun embedding, nessun LLM ─
+    if intent == retrieval.Intent.CODE_SPECIFIC:
+        chunks = retrieval.lookup_collateral(registry_entry, code)
+
+        if not chunks:
+            print("[routing] nessun risultato collaterale → fallback vector search")
+            intent = retrieval.Intent.GENERIC  # ricade nel ramo vector
+        else:
+            _display_direct_text(chunks)
+            _print_normative_sources(chunks, registry_entry)
+            return
+
+    # ── 4. Embedding (necessario per tutti i rami rimanenti) ───────────────
     normalized_query = normalize_query(q, intent)
-
     print(f"[normalization] embedding query: {normalized_query}")
 
-    # ------------------------------------------------------------------
-    # FULL TEXT MODE (direct reference)
-    # ------------------------------------------------------------------
+    try:
+        query_embedding = embeddings.get_embedding(normalized_query)
+    except Exception as e:
+        print("Errore embedding:", e)
+        sys.exit(1)
 
-    if contains_specific_reference(q):
+    # ── 5. PROCEDURAL + codice: collaterale + vector search → LLM ─────────
+    if intent == retrieval.Intent.PROCEDURAL and registry_entry:
+        collateral = retrieval.lookup_collateral(registry_entry, code)
+        vec_chunks = retrieval.vector_search(query_embedding)
+        combined   = collateral + vec_chunks
+
+        if not combined:
+            print("Nessun risultato trovato.")
+            sys.exit(0)
 
         try:
-            query_embedding = embeddings.get_embedding(normalized_query)
-            chunks, _ = retrieval.search_chunks(q, query_embedding)
-
-            if not chunks:
-                print("Nessun risultato trovato.")
-                sys.exit(0)
-
-            print("\n=== OFFICIAL NORMATIVE TEXT ===\n")
-
-            for chunk in chunks:
-                print(chunk.get("chunk_text"))
-                print("\n---")
-
-            print_normative_sources(chunks)
-
-        except Exception as e:
-            print("Errore retrieval:", e)
+            _run_llm_and_print(q, combined, registry_entry)
+        except (APIError, APIConnectionError, ValueError) as e:
+            print("Errore LLM:", e)
             sys.exit(1)
 
         return
 
-    # ------------------------------------------------------------------
-    # INTERPRETATIVE MODE
-    # ------------------------------------------------------------------
+    # ── 6. CLASSIFICATION / GENERIC: solo vector search → LLM ─────────────
+    type_filters = (
+        ["ANNEX_CODE"] if intent == retrieval.Intent.CLASSIFICATION else None
+    )
+
+    chunks = retrieval.vector_search(query_embedding, type_filters=type_filters)
+
+    if not chunks and type_filters:
+        print(f"[routing] nessun risultato con filtri={type_filters} → fallback global")
+        chunks = retrieval.vector_search(query_embedding)
+
+    if not chunks:
+        print("Nessun risultato trovato.")
+        sys.exit(0)
 
     try:
-        query_embedding = embeddings.get_embedding(normalized_query)
-        chunks, used_structured_by_code = retrieval.search_chunks(q, query_embedding)
-
-        if not chunks:
-            print("Nessun risultato trovato.")
-            sys.exit(0)
-
-        context = prompt_module.format_context(chunks)
-
-        answer = llm.generate_answer(
-            q,  # original user question
-            context,
-            used_structured_by_code=used_structured_by_code,
-        )
-
-        print("\n=== RISPOSTA ===\n")
-        print(answer)
-
-        print_normative_sources(chunks)
-
-        print("\n---")
-
-    except (APIError, APIConnectionError) as e:
+        _run_llm_and_print(q, chunks, registry_entry=None)
+    except (APIError, APIConnectionError, ValueError) as e:
         print("Errore LLM:", e)
         sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
-# ENTRY POINT
+# Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Uso: python main.py \"domanda\"")
+        print('Uso: python main.py "domanda"')
         sys.exit(1)
 
     run(" ".join(sys.argv[1:]))
