@@ -1,331 +1,237 @@
-# .cursorrules
+# .cursorrules – CustomsAI v2
 
-## 1. Missione di questa fase
+## 1. Missione attuale del sistema
 
-Costruire una **prima versione ultra-base funzionante** del sistema RAG per interrogare normativa strutturata.
+CustomsAI non è più un RAG sperimentale.
 
-Il sistema deve:
+È un **motore normativo AI-first** per interrogare normativa strutturata,
+con comportamento deterministico, tracciabile e verificabile.
+
+Obiettivo:
 
 - ricevere una domanda
-- cercare i chunk rilevanti nel database vettoriale
-- generare una risposta usando SOLO il contesto
-- citare articoli e fonti
-- gestire correttamente i casi in cui l’informazione non è presente
+- determinare il tipo di interrogazione
+- eseguire retrieval strutturato o vettoriale
+- generare risposta SOLO dal contesto
+- garantire tracciabilità delle fonti
+- impedire hallucination normativa
 
-⚠️ Il sistema deve essere **generico**, non costruito su una normativa specifica.
+Il sistema deve essere:
 
-Anche se attualmente il database contiene una sola normativa, l’app NON deve:
-
-- assumere quale normativa sia presente
-- fare riferimento a un regolamento specifico
-- adattare il comportamento a un dominio specifico
-
-Il sistema deve funzionare anche quando:
-- l’informazione non esiste nel database
-- la domanda è fuori ambito
-
-Questa fase serve a VALIDARE il funzionamento, non a perfezionare il prodotto.
+✔ generico  
+✔ domain-agnostic  
+✔ deterministico  
+✔ scalabile  
+✔ auditabile  
 
 ---
 
-## 2. Obiettivi funzionali minimi
+## 2. Principi architetturali obbligatori
 
-Il sistema deve:
+### Separazione dei layer
 
-1. generare embedding della domanda
-2. **retrieval ibrido**: se la domanda contiene un codice normativo (es. 2B002), tentare prima il retrieval strutturato per `metadata.code`; altrimenti (o se nessun match) usare la vector search tramite RPC
-3. recuperare i chunk più rilevanti (con text, metadata, title, source_url, similarity)
-4. costruire il contesto con header metadata (TYPE, CELEX, Art, Code, Recital, ecc.) quando presenti
-5. passare il contesto all’LLM
-6. generare risposta citata
-7. indicare chiaramente quando l’informazione non è presente
-8. stampare risultato leggibile (inclusi type, celex, article/code, similarity in debug)
+Parsing ≠ Chunking ≠ Embedding ≠ Retrieval ≠ LLM
 
-Se uno di questi passaggi fallisce → il sistema non è pronto.
+Nessuna logica cross-layer.
 
----
+### Determinismo
 
-## 3. Stack tecnico autorizzato
+- Nessuna dipendenza da LLM per routing
+- Nessun filtro post-ranking lato Python
+- Nessuna generazione di fonti da parte dell’LLM
+- Nessuna conoscenza esterna
 
-### Linguaggio
-- Python 3.11+
+### Database-first
 
-### Librerie
-- openai
-- supabase
-- python-dotenv
+Il database è la fonte di verità normativa.
 
-### Database
-- Supabase PostgreSQL + pgvector
-
-### Modelli
-- Embeddings: `text-embedding-3-small` (predefinito; usare `text-embedding-3-large` solo se l’account OpenAI lo supporta)
-- LLM: GPT (configurabile via `LLM_MODEL` in .env)
-- Limite contesto: `MAX_CONTEXT_CHARS` in .env (default 30000), per evitare errori con contesti lunghi
-
-NON introdurre librerie aggiuntive.
-
-### Esecuzione
-- Da terminale: `python3 main.py "domanda"` (su macOS usare `python3`).
-- Variabili obbligatorie in .env: `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`.
-- Opzionali: `LLM_MODEL`, `TOP_K`, `MAX_CONTEXT_CHARS`.
+Se un CELEX non è nei chunk → non può essere citato.
 
 ---
 
-## 4. Architettura obbligatoria
-
-Pipeline:
+## 3. Pipeline obbligatoria
 
 ```
+
 User Question
 ↓
-Embedding domanda (sempre, per fallback)
+Embedding domanda (sempre)
 ↓
-Codice normativo in domanda? (regex case-insensitive, es. 2B002 / 2b002)
-   Sì → Retrieval strutturato (metadata.code) su tabella chunks
-        → Se risultati: usa quelli (similarity=1.0)
-        → Se nessuno: fallback a vector search
-   No  → Vector search (RPC search_chunks)
+Hybrid Retrieval
+├─ Codice normativo rilevato?
+│      ├─ Retrieval strutturato (metadata.code)
+│      └─ Se nessun match → fallback vector
+└─ Nessun codice → Vector search (RPC)
 ↓
-Top chunks (text, metadata, title, source_url, similarity) + flag used_structured_by_code
+Top chunks (text, metadata, title, source_url, similarity)
 ↓
-Context builder con header metadata (TYPE, CELEX, Art, Code, Recital…)
+Context builder con header metadata
 ↓
-LLM: scelta prompt in base a used_structured_by_code
-   Sì (retrieval strutturato per codice) → modalità "codice diretto": riproduzione fedele del testo, niente sintesi/interpretazione
-   No  → modalità "domanda interpretativa": risposta strutturata, sintesi, citazioni
+LLM (modalità interpretativa o codice diretto)
 ↓
-Risposta citata o messaggio di assenza informazioni
-```
-
-Separazione file:
-
-```
-
-config.py
-embeddings.py
-retrieval.py
-prompt.py
-llm.py
-main.py
+Risposta
+↓
+Fonti normative stampate deterministicamente da Python
 
 ```
 
 ---
 
-## 5. Schema dati atteso
+## 4. Regole di retrieval
 
-Tabella Supabase: `chunks`
+### 4.1 Retrieval ibrido
 
-Campi utilizzati:
+Pattern codice:
+```
 
-- `text` (text) – contenuto del chunk
-- `metadata` (jsonb) – struttura tipo: type, celex, article, paragraph, letter, annex, code (a seconda della normativa)
-- `title` (text)
-- `source_url` (text)
-- `embedding` (vector) – per la vector search
+[0-9][A-Za-z][0-9]{3}
 
-L’app mappa in `ChunkRow`: chunk_text, metadata (dict), title, source_url, similarity.
+```
 
-NON modificare lo schema del database.
+Se presente:
 
-Il codice NON deve assumere quale normativa sia presente.
+- tentare retrieval strutturato su `metadata->>'code'`
+- similarity = 1.0
+- se nessun risultato → fallback vector search
 
----
+Altrimenti:
 
-## 6. Regole per il retrieval
+- usare RPC `search_chunks`
 
-### Retrieval ibrido
-- **Codice normativo in domanda** (pattern `[0-9][A-Za-z][0-9]{3}`, case-insensitive, es. 2B002, 2b002, "codice 2b002", "(2b002)"): il codice rilevato viene normalizzato in maiuscolo per il lookup. Prima retrieval strutturato su `metadata->>'code'` (select su tabella, senza RPC). Se ci sono risultati, restituirli (similarity=1.0). Altrimenti fallback a vector search.
-- **Nessun codice o nessun match strutturato**: usare RPC `search_chunks` (vector search) come prima.
+### 4.2 Nessun filtro per dominio
 
-### top_k
-5–15 risultati (configurabile fino a 20), stesso limite per strutturato e vettoriale.
+È vietato:
 
-### ordinamento
-- Strutturato: ordine naturale della select.
-- Vector search: per similarità vettoriale.
+- filtrare per CELEX
+- filtrare per type (article-first)
+- adattare retrieval a normativa specifica
 
-### formato restituito (sempre uguale)
-- chunk_text, metadata (dict), title, source_url, similarity (float o 1.0 per strutturato)
-
-### contesto per LLM
-- Header da metadata quando presenti (es. `[TYPE: article | CELEX: ... | Art: 12 | Code: 2B002]`), poi testo chunk e fonte.
-- Il totale caratteri non deve superare `MAX_CONTEXT_CHARS` (es. 30000). Se supera, messaggio chiaro e stop.
-
-Se non vengono trovati risultati:
-→ il sistema deve informare l’utente.
+Il sistema deve funzionare con qualsiasi normativa caricata.
 
 ---
 
-## 7. Prompt LLM: due modalità
+## 5. Regole per il prompt LLM
 
-Il modello DEVE sempre usare solo il contesto fornito, non inventare, non usare conoscenza esterna. La **modalità** dipende dal tipo di retrieval.
+Due modalità:
 
-### Modalità "Codice diretto" (quando retrieval strutturato per codice)
+### Modalità Codice Diretto
+- Riproduzione fedele del testo
+- Nessuna sintesi
+- Nessuna interpretazione
+- Nessuna sezione aggiuntiva
 
-Se la domanda contiene un codice normativo e il retrieval ha restituito risultati strutturati (`used_structured_by_code = True`):
+### Modalità Interpretativa
+- Sintesi strutturata
+- Citazione articoli quando presenti
+- Nessuna deduzione esterna
 
-- **Risposta = riproduzione fedele** del testo normativo presente nel contesto.
-- NON sintetizzare, NON riformulare, NON interpretare.
-- NON aggiungere elenchi (a, b, c) o struttura non presente nel testo.
-- Eventuale citazione CELEX una sola volta; nessuna sezione aggiuntiva (es. "Note o eccezioni") se non nel contesto.
-- Se il contesto è vuoto o non pertinente: solo "Informazione non presente nel contesto fornito."
+### Regole assolute
 
-### Modalità "Domanda interpretativa" (vector search o fallback)
-
-Per domande concettuali (es. "quali sono gli obblighi…"):
-
-- Risposta strutturata: sintesi, articoli rilevanti, ambito, note/eccezioni se presenti.
-- Citare articoli quando disponibili.
-- Dichiarare assenza solo se l’informazione non è nel contesto.
-
----
-
-## 8. Regole per la generazione della risposta
-
-- **Modalità codice diretto**: risposta = testo normativo trascritto fedelmente; niente sintesi, niente sezioni inventate.
-- **Modalità interpretativa**: risposta sintetica e chiara, citazioni articoli, ambito/note se presenti.
-
-In entrambe le modalità NON deve:
-
-- interpretare oltre il contesto
-- fare deduzioni legali
-- usare conoscenza esterna
-- assumere quale normativa sia interrogata
+- L’LLM non può generare CELEX autonomamente
+- Le fonti normative non devono essere generate dall’LLM
+- Le fonti sono stampate solo dal codice Python
 
 ---
 
-## 9. Regole di qualità del codice
+## 6. Fonti normative
 
-### Obbligatorio
+Le fonti devono essere:
 
-- codice semplice e leggibile
-- funzioni brevi e modulari
-- type hints dove utili
-- gestione errori API e rete
-- output chiaro per debugging
-- in `main.py` le eccezioni OpenAI (`APIError`, `APIConnectionError`) devono essere importate (es. da `openai`) dove vengono usate nell’except
+- Derivate esclusivamente da `celex_consolidated` nei chunk
+- Stampate deterministicamente da Python
+- Non generate dal modello
 
-### Commenti
+Formato:
 
-Il codice deve essere commentato per spiegare:
-
-- cosa fa ogni funzione
-- perché viene eseguita
-- cosa può essere migliorato in futuro
-
-Esempio:
-
-```python
-# Generate embedding for the user question.
-# This vector enables semantic search in the vector database.
-````
+```
 
 ---
 
-## 10. Linee guida per la scrittura del codice
+FONTI NORMATIVE
 
-### Preferire
+CELEX: XXXXX
+[https://eur-lex.europa.eu/](https://eur-lex.europa.eu/)...
+-----------------------------------------------------------
 
-✔ chiarezza > astrazione
-✔ esplicito > implicito
-✔ debug facile > eleganza
-
-### Evitare
-
-❌ classi inutili
-❌ design pattern complessi
-❌ ottimizzazioni premature
-❌ funzioni troppo generiche
+```
 
 ---
 
-## 11. Logging e debug
+## 7. Logging obbligatorio
 
 Stampare:
 
-* domanda utente
-* se rilevato codice normativo: `[hybrid] detected normative code: X`
-* se usato retrieval strutturato: `[structured retrieval] code=X -> N result(s)` oppure `no match, fallback to vector search`
-* per ogni chunk (debug): type, celex, article/code, similarity
-* numero chunk recuperati
-* articoli/code trovati (da metadata)
-* lunghezza contesto
-* risposta finale
-
-Serve per valutare la qualità del retrieval (ibrido vs vettoriale) e della risposta.
+- domanda utente
+- codice rilevato (se presente)
+- numero risultati strutturati
+- numero risultati vettoriali
+- per ogni chunk: type, celex, article/code, similarity
+- lunghezza contesto
+- risposta finale
 
 ---
 
-## 12. Cosa NON sviluppare ora
+## 8. Limiti di contesto
 
-❌ interfaccia grafica
-❌ caching avanzato
-❌ ottimizzazione performance
-❌ multi-utente
-❌ sicurezza avanzata
-❌ orchestrazioni complesse
-❌ classificazione automatica
-❌ interpretazione normativa
-❌ logica specifica per una normativa
-❌ filtri hardcoded per dominio specifico
+Se il contesto supera `MAX_CONTEXT_CHARS`:
 
-Focus: validazione funzionale generica.
+- interrompere flusso
+- stampare messaggio chiaro
+- suggerire aumento valore o riduzione TOP_K
 
 ---
 
-## 13. Error handling obbligatorio
+## 9. Cosa è vietato sviluppare in questa fase
 
-Gestire:
+❌ logica dominio-specifica  
+❌ routing per normativa specifica  
+❌ CELEX hardcoded  
+❌ classificazione automatica  
+❌ reasoning predittivo  
+❌ confronto versioni consolidate  
+❌ multi-database logic  
 
-* nessun risultato retrieval
-* errori API OpenAI
-* errori connessione Supabase
-* contesto troppo lungo (rispetto a `MAX_CONTEXT_CHARS`; aumentare il valore in .env o ridurre TOP_K se necessario)
-
-In caso di errore:
-stampare messaggio chiaro e interrompere il flusso.
-
----
-
-## 14. Protocollo di incertezza
-
-Se il modello o il codice non è sicuro:
-
-1. NON inventare comportamenti.
-2. NON introdurre logiche specifiche per normative.
-3. NON modificare architettura.
-4. Preferire soluzione semplice e sicura.
-5. Segnalare dubbi nei commenti.
-6. Fermare il flusso se i dati non sono affidabili.
+Focus: stabilità retrieval + correttezza normativa.
 
 ---
 
-## 15. Criteri per considerare la versione riuscita
+## 10. Criteri di validazione
 
 La versione è valida se:
 
-✔ recupera chunk rilevanti
-✔ cita articoli corretti quando disponibili
-✔ non inventa informazioni
-✔ segnala quando i dati non sono presenti
-✔ funziona anche fuori ambito
-✔ produce risposte utili e verificabili
+✔ Hybrid retrieval funziona  
+✔ Vector retrieval funziona  
+✔ Nessuna hallucination normativa  
+✔ Fonti sempre corrette  
+✔ Funziona fuori ambito  
+✔ Codice leggibile e modulare  
 
 ---
 
-## 16. Filosofia di sviluppo
+## 11. Filosofia
 
-Questo codice non deve essere perfetto.
-Deve essere:
+Prima stabilità.
+Poi sofisticazione.
 
-* verificabile
-* comprensibile
-* migliorabile
-* solido nelle basi
+CustomsAI evolve per fasi controllate:
 
-Prima validiamo il funzionamento.
-Poi miglioreremo precisione e UX.
+Fase 1 – Retrieval stabile  
+Fase 2 – Miglioramento semantico  
+Fase 3 – Motore decisionale  
+Fase 4 – Reasoning normativo avanzato  
+
+Ogni fase deve essere validata prima di evolvere.
+```
+
+---
+
+# 🎯 Cosa abbiamo fatto
+
+* Riallineato le regole allo stato reale del sistema
+* Eliminato incoerenze della fase 1
+* Formalizzato hybrid retrieval
+* Formalizzato separazione fonti
+* Bloccato logiche dominio-specifiche
+* Preparato terreno per fase 2
 
 ---

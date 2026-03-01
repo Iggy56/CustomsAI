@@ -1,42 +1,66 @@
 """
-RAG pipeline: question → embedding → vector search → LLM → cited answer.
-Generic over any normative content in chunks; no domain-specific logic.
+CustomsAI – Intent-aware main
+with deterministic query normalization layer
 """
 
 import sys
+import re
 
 from openai import APIError, APIConnectionError
 
-import config
 import embeddings
 import retrieval
 import prompt as prompt_module
 import llm
-from retrieval import ChunkRow
+from query_normalizer import normalize_query
+
 
 # ---------------------------------------------------------------------------
-# Logging (cursorrules: print question, n chunks, articles, context length, answer)
+# Helpers
 # ---------------------------------------------------------------------------
 
+def contains_specific_reference(query: str) -> bool:
+    if not query:
+        return False
 
-def log_run(question: str, chunks: list[ChunkRow], context: str, answer: str) -> None:
-    """Print debug info for retrieval and response quality."""
-    # Collect article/code from metadata when present (backward compatible)
-    refs = []
+    if re.search(r"\b[0-9][A-Za-z][0-9]{3}\b", query):
+        return True
+
+    if re.search(r"\b\d{4,10}\b", query):
+        return True
+
+    return False
+
+
+def extract_celex_from_chunks(chunks: list[dict]) -> list[str]:
+    celex_set = set()
+
     for c in chunks:
-        meta = c.get("metadata") or {}
-        if isinstance(meta, dict):
-            if meta.get("article") is not None:
-                refs.append(str(meta.get("article")))
-            elif meta.get("code") is not None:
-                refs.append(str(meta.get("code")))
-    print("---")
-    print("Domanda:", question[:200] + ("..." if len(question) > 200 else ""))
-    print("Chunk recuperati:", len(chunks))
-    print("Articoli/code trovati:", refs if refs else "(nessuno)")
-    print("Lunghezza contesto (caratteri):", len(context))
-    print("---")
-    print("Risposta:\n", answer)
+        celex = c.get("celex_consolidated")
+        if celex:
+            celex_set.add(str(celex))
+
+    return sorted(celex_set)
+
+
+def eurlex_link(celex: str) -> str:
+    return f"https://eur-lex.europa.eu/legal-content/IT/TXT/?uri=CELEX:{celex}"
+
+
+def print_normative_sources(chunks: list[dict]) -> None:
+    celex_list = extract_celex_from_chunks(chunks)
+
+    if not celex_list:
+        return
+
+    print("\n---")
+    print("FONTI NORMATIVE (deterministiche)\n")
+
+    for celex in celex_list:
+        print(f"CELEX: {celex}")
+        print(eurlex_link(celex))
+        print()
+
     print("---")
 
 
@@ -44,78 +68,88 @@ def log_run(question: str, chunks: list[ChunkRow], context: str, answer: str) ->
 # Pipeline
 # ---------------------------------------------------------------------------
 
-
 def run(question: str) -> None:
-    """
-    Run the full pipeline. On missing config, API errors, or no results, print a clear
-    message and exit without producing a fake answer.
-    """
+
     q = (question or "").strip()
     if not q:
-        print("Errore: fornire una domanda non vuota.")
+        print("Errore: domanda vuota.")
         sys.exit(1)
 
-    # 1) Embedding
-    try:
-        if not config.OPENAI_API_KEY:
-            print("Errore: OPENAI_API_KEY non impostata.")
+    # Detect intent early (deterministic)
+    intent = retrieval.detect_intent(q)
+
+    # Normalize only for embedding generation
+    normalized_query = normalize_query(q, intent)
+
+    print(f"[normalization] embedding query: {normalized_query}")
+
+    # ------------------------------------------------------------------
+    # FULL TEXT MODE (direct reference)
+    # ------------------------------------------------------------------
+
+    if contains_specific_reference(q):
+
+        try:
+            query_embedding = embeddings.get_embedding(normalized_query)
+            chunks, _ = retrieval.search_chunks(q, query_embedding)
+
+            if not chunks:
+                print("Nessun risultato trovato.")
+                sys.exit(0)
+
+            print("\n=== OFFICIAL NORMATIVE TEXT ===\n")
+
+            for chunk in chunks:
+                print(chunk.get("chunk_text"))
+                print("\n---")
+
+            print_normative_sources(chunks)
+
+        except Exception as e:
+            print("Errore retrieval:", e)
             sys.exit(1)
-        query_embedding = embeddings.get_embedding(q)
-    except Exception as e:
-        print("Errore durante la generazione dell'embedding:", e)
-        sys.exit(1)
 
-    # 2) Hybrid retrieval (structured by code if detected, else vector search)
+        return
+
+    # ------------------------------------------------------------------
+    # INTERPRETATIVE MODE
+    # ------------------------------------------------------------------
+
     try:
+        query_embedding = embeddings.get_embedding(normalized_query)
         chunks, used_structured_by_code = retrieval.search_chunks(q, query_embedding)
-    except ValueError as e:
-        print("Errore configurazione Supabase:", e)
-        sys.exit(1)
-    except Exception as e:
-        print("Errore connessione Supabase o RPC:", e)
-        sys.exit(1)
 
-    if not chunks:
-        print("Nessun risultato dal retrieval. L'informazione non è presente nel database.")
-        sys.exit(0)
+        if not chunks:
+            print("Nessun risultato trovato.")
+            sys.exit(0)
 
-    # Debug: type, celex, article/code, similarity per chunk
-    print("\nTop chunks:")
-    for i, chunk in enumerate(chunks):
-        meta = chunk.get("metadata") or {}
-        if not isinstance(meta, dict):
-            meta = {}
-        typ = meta.get("type", "N/A")
-        celex = meta.get("celex", "N/A")
-        art_or_code = meta.get("article") or meta.get("code") or "N/A"
-        print(f"\n[{i+1}] type={typ} | celex={celex} | article/code={art_or_code} | similarity={chunk.get('similarity', 'N/A')}")
-        chunk_text = chunk.get("chunk_text") or ""
-        print(f"Preview: {chunk_text[:200]}...")
+        context = prompt_module.format_context(chunks)
 
-    # 3) Context and length check
-    context = prompt_module.format_context(chunks)
-    if len(context) > config.MAX_CONTEXT_CHARS:
-        print(
-            f"Errore: contesto troppo lungo ({len(context)} caratteri). "
-            f"Limite: {config.MAX_CONTEXT_CHARS}."
+        answer = llm.generate_answer(
+            q,  # original user question
+            context,
+            used_structured_by_code=used_structured_by_code,
         )
-        sys.exit(1)
 
-    # 4) LLM (modalità "codice diretto" se retrieval strutturato per code, altrimenti interpretativa)
-    try:
-        answer = llm.generate_answer(q, context, used_structured_by_code=used_structured_by_code)
+        print("\n=== RISPOSTA ===\n")
+        print(answer)
+
+        print_normative_sources(chunks)
+
+        print("\n---")
+
     except (APIError, APIConnectionError) as e:
-        print("Errore API OpenAI:", e)
-        sys.exit(1)
-    except ValueError as e:
-        print(e)
+        print("Errore LLM:", e)
         sys.exit(1)
 
-    log_run(q, chunks, context, answer)
 
+# ---------------------------------------------------------------------------
+# ENTRY POINT
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Uso: python main.py \"domanda\"")
         sys.exit(1)
+
     run(" ".join(sys.argv[1:]))
