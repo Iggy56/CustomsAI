@@ -34,7 +34,7 @@ def _eurlex_link(celex: str) -> str:
 
 def _print_normative_sources(
     chunks: list[dict],
-    registry_entry: dict | None,
+    registry_entries: list[dict],
 ) -> None:
     """
     Stampa le fonti normative in modo deterministico.
@@ -45,9 +45,9 @@ def _print_normative_sources(
     """
     lines: list[str] = []
 
-    # 1. Fonte statica dal registry (es. nomenclature)
-    if registry_entry:
-        src = registry_entry.get("source", {})
+    # 1. Fonti statiche dal registry (es. nomenclature, dual_use_correlations)
+    for entry in registry_entries:
+        src = entry.get("source", {})
         if src.get("type") == "static_celex":
             if src.get("label"):
                 lines.append(src["label"])
@@ -88,13 +88,13 @@ def _display_direct_text(chunks: list[dict]) -> None:
 def _run_llm_and_print(
     question: str,
     chunks: list[dict],
-    registry_entry: dict | None,
+    registry_entries: list[dict],
 ) -> None:
     context = prompt_module.format_context(chunks)
     answer = llm.generate_answer(question, context, used_structured_by_code=False)
     print("\n=== RISPOSTA ===\n")
     print(answer)
-    _print_normative_sources(chunks, registry_entry)
+    _print_normative_sources(chunks, registry_entries)
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +108,13 @@ def run(question: str) -> None:
         sys.exit(1)
 
     # ── 1. Intent (keyword) + codice (registry pattern scan) ──────────────
-    base_intent    = retrieval.detect_intent(q)
-    registry_entry, code = detect_code_from_registry(q)
+    base_intent     = retrieval.detect_intent(q)
+    registry_matches = detect_code_from_registry(q)   # list[tuple[dict, str]]
+    registry_entries = [e for e, _ in registry_matches]
 
     # ── 2. Intent finale ───────────────────────────────────────────────────
-    # Se c'è un codice e l'intent non è procedurale → CODE_SPECIFIC
-    if registry_entry:
+    # Se c'è almeno un codice e l'intent non è procedurale → CODE_SPECIFIC
+    if registry_matches:
         intent = (
             base_intent
             if base_intent == retrieval.Intent.PROCEDURAL
@@ -124,20 +125,26 @@ def run(question: str) -> None:
 
     print(
         f"[routing] intent={intent.value} | "
-        f"code={code} | "
-        f"db={registry_entry['id'] if registry_entry else '-'}"
+        f"code={','.join(c for _,c in registry_matches) if registry_matches else '-'} | "
+        f"db={','.join(e['id'] for e,_ in registry_matches) if registry_matches else '-'}"
     )
 
     # ── 3. CODE_SPECIFIC: lookup collaterale, nessun embedding, nessun LLM ─
     if intent == retrieval.Intent.CODE_SPECIFIC:
-        chunks = retrieval.lookup_collateral(registry_entry, code)
+        chunks = []
+        active_entries: list[dict] = []   # solo entry che hanno prodotto risultati
+        for entry, code in registry_matches:
+            results = retrieval.lookup_collateral(entry, code)
+            if results:
+                chunks += results
+                active_entries.append(entry)
 
         if not chunks:
             print("[routing] nessun risultato collaterale → fallback vector search")
             intent = retrieval.Intent.GENERIC  # ricade nel ramo vector
         else:
             _display_direct_text(chunks)
-            _print_normative_sources(chunks, registry_entry)
+            _print_normative_sources(chunks, active_entries)
             return
 
     # ── 4. Embedding (necessario per tutti i rami rimanenti) ───────────────
@@ -151,8 +158,14 @@ def run(question: str) -> None:
         sys.exit(1)
 
     # ── 5. PROCEDURAL + codice: collaterale + vector search → LLM ─────────
-    if intent == retrieval.Intent.PROCEDURAL and registry_entry:
-        collateral = retrieval.lookup_collateral(registry_entry, code)
+    if intent == retrieval.Intent.PROCEDURAL and registry_matches:
+        collateral = []
+        active_entries = []   # solo entry che hanno prodotto risultati
+        for entry, code in registry_matches:
+            results = retrieval.lookup_collateral(entry, code)
+            if results:
+                collateral += results
+                active_entries.append(entry)
         vec_chunks = retrieval.vector_search(query_embedding)
         combined   = collateral + vec_chunks
 
@@ -161,7 +174,7 @@ def run(question: str) -> None:
             sys.exit(0)
 
         try:
-            _run_llm_and_print(q, combined, registry_entry)
+            _run_llm_and_print(q, combined, active_entries)
         except (APIError, APIConnectionError, ValueError) as e:
             print("Errore LLM:", e)
             sys.exit(1)
@@ -184,7 +197,7 @@ def run(question: str) -> None:
         sys.exit(0)
 
     try:
-        _run_llm_and_print(q, chunks, registry_entry=None)
+        _run_llm_and_print(q, chunks, registry_entries=[])
     except (APIError, APIConnectionError, ValueError) as e:
         print("Errore LLM:", e)
         sys.exit(1)

@@ -53,30 +53,47 @@ REGISTRY: list[dict] = [
             "label": "Nomenclatura Combinata (Reg. CEE 2658/87)",
         },
     },
+    {
+        "id": "dual_use_correlations",
+        "table": "dual_use_correlations",
+        "code_field": "cn_codes_2026",
+        "text_field": "dual_use_codification",
+        "pattern": r"\b\d{4,10}\b",
+        "label": "Dual Use Correlations",
+        "match_mode": "prefix",
+        # display_code_field: il codice NC viene anteposto alla codifica DU
+        # in modo da mostrare "8704229100  9A115b" invece del solo "9A115b"
+        "display_code_field": "cn_codes_2026",
+        "source": {
+            "type": "static_celex",
+            "celex": "32021R0821",
+            "url": "https://eur-lex.europa.eu/legal-content/IT/TXT/?uri=CELEX:32021R0821",
+            "label": "Regolamento UE 2021/821 (Beni a duplice uso)",
+        },
+    },
 ]
 
 # Pre-compile patterns in registry order (IGNORECASE per tollerare input minuscolo).
-# L'ordine è significativo: il primo match vince.
 _COMPILED: list[tuple[dict, re.Pattern]] = [
     (entry, re.compile(entry["pattern"], re.IGNORECASE))
     for entry in REGISTRY
 ]
 
 
-def detect_code_from_registry(query: str) -> tuple[dict | None, str | None]:
+def detect_code_from_registry(query: str) -> list[tuple[dict, str]]:
     """
-    Scansiona i pattern del registry nell'ordine in cui sono definiti.
-    Restituisce (entry, codice_normalizzato) per il primo match, oppure (None, None).
+    Scansiona tutti i pattern del registry nell'ordine in cui sono definiti.
+    Restituisce lista di (entry, codice_normalizzato) per ogni match, oppure [].
 
     Il codice è normalizzato in uppercase per garantire consistenza nei lookup.
     """
     if not query:
-        return None, None
+        return []
 
+    matches = []
     for entry, pattern in _COMPILED:
         match = pattern.search(query)
         if match:
             code = match.group(0).upper()
-            return entry, code
-
-    return None, None
+            matches.append((entry, code))
+    return matches

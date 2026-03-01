@@ -29,7 +29,7 @@ def test_eurlex_link_various_celex():
 
 def test_sources_celex_field_prints_celex(capsys):
     chunks = [{"celex_consolidated": "32021R0821", "chunk_text": "..."}]
-    _print_normative_sources(chunks, registry_entry=None)
+    _print_normative_sources(chunks, registry_entries=[])
     out = capsys.readouterr().out
     assert "32021R0821" in out
     assert "FONTI NORMATIVE" in out
@@ -42,7 +42,7 @@ def test_sources_celex_field_no_duplicates(capsys):
         {"celex_consolidated": "32021R0821", "chunk_text": "chunk 2"},
         {"celex_consolidated": "32019R2220", "chunk_text": "chunk 3"},
     ]
-    _print_normative_sources(chunks, registry_entry=None)
+    _print_normative_sources(chunks, registry_entries=[])
     out = capsys.readouterr().out
     celex_lines = [line for line in out.splitlines() if line.startswith("CELEX:")]
     assert celex_lines.count("CELEX: 32021R0821") == 1
@@ -53,7 +53,7 @@ def test_sources_celex_field_multiple(capsys):
         {"celex_consolidated": "32021R0821", "chunk_text": "a"},
         {"celex_consolidated": "32019R2220", "chunk_text": "b"},
     ]
-    _print_normative_sources(chunks, registry_entry=None)
+    _print_normative_sources(chunks, registry_entries=[])
     out = capsys.readouterr().out
     assert "32021R0821" in out
     assert "32019R2220" in out
@@ -71,14 +71,14 @@ NOMENCLATURE_ENTRY = {
 }
 
 def test_sources_static_celex_prints_celex(capsys):
-    _print_normative_sources([], registry_entry=NOMENCLATURE_ENTRY)
+    _print_normative_sources([], registry_entries=[NOMENCLATURE_ENTRY])
     out = capsys.readouterr().out
     assert "31987R2658" in out
     assert "Nomenclatura Combinata" in out
     assert "FONTI NORMATIVE" in out
 
 def test_sources_static_celex_prints_url(capsys):
-    _print_normative_sources([], registry_entry=NOMENCLATURE_ENTRY)
+    _print_normative_sources([], registry_entries=[NOMENCLATURE_ENTRY])
     out = capsys.readouterr().out
     assert NOMENCLATURE_ENTRY["source"]["url"] in out
 
@@ -88,7 +88,7 @@ def test_sources_static_celex_prints_url(capsys):
 def test_sources_both_printed(capsys):
     """static_celex dal registry + celex_field dai chunk devono apparire entrambi."""
     chunks = [{"celex_consolidated": "32021R0821", "chunk_text": "..."}]
-    _print_normative_sources(chunks, registry_entry=NOMENCLATURE_ENTRY)
+    _print_normative_sources(chunks, registry_entries=[NOMENCLATURE_ENTRY])
     out = capsys.readouterr().out
     assert "31987R2658" in out
     assert "32021R0821" in out
@@ -97,13 +97,13 @@ def test_sources_both_printed(capsys):
 # ── Nessuna fonte: nessun output ──────────────────────────────────────────────
 
 def test_sources_empty_no_output(capsys):
-    _print_normative_sources([], registry_entry=None)
+    _print_normative_sources([], registry_entries=[])
     out = capsys.readouterr().out
     assert out == ""
 
 def test_sources_chunks_without_celex_no_output(capsys):
     chunks = [{"celex_consolidated": None, "chunk_text": "..."}, {"chunk_text": "..."}]
-    _print_normative_sources(chunks, registry_entry=None)
+    _print_normative_sources(chunks, registry_entries=[])
     out = capsys.readouterr().out
     assert out == ""
 
@@ -111,7 +111,7 @@ def test_sources_celex_field_source_type_no_static(capsys):
     """Se registry entry ha type=celex_field, non stampa CELEX fisso."""
     entry_celex_field = {"source": {"type": "celex_field"}}
     chunks = [{"celex_consolidated": "32021R0821", "chunk_text": "..."}]
-    _print_normative_sources(chunks, registry_entry=entry_celex_field)
+    _print_normative_sources(chunks, registry_entries=[entry_celex_field])
     out = capsys.readouterr().out
     # Solo il CELEX dal chunk, nessun CELEX fisso dal registry
     assert "32021R0821" in out

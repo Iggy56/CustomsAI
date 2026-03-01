@@ -6,6 +6,7 @@ Testa:
   - rilevamento codice dual-use (exact, case-insensitive)
   - rilevamento codice NC / nomenclature (prefix)
   - priorità: dual_use prima di nomenclature
+  - multi-match: codice NC restituisce anche dual_use_correlations
   - nessun match per query generiche
 """
 
@@ -56,23 +57,29 @@ def test_static_celex_has_required_fields():
     ("bene 9E003", "9E003"),
 ])
 def test_detect_dual_use(query, expected_code):
-    entry, code = detect_code_from_registry(query)
+    matches = detect_code_from_registry(query)
+    assert len(matches) >= 1
+    entry, code = matches[0]
     assert entry is not None
     assert entry["id"] == "dual_use"
     assert code == expected_code
 
 def test_detect_dual_use_case_insensitive():
     """L'utente può scrivere in minuscolo: 2b002 deve matchare."""
-    entry, code = detect_code_from_registry("bene 2b002")
+    matches = detect_code_from_registry("bene 2b002")
+    assert len(matches) >= 1
+    entry, code = matches[0]
     assert entry is not None
     assert entry["id"] == "dual_use"
     assert code == "2B002"  # normalizzato uppercase
 
 def test_detect_dual_use_priority_over_nomenclature():
     """2B002 contiene cifre → potrebbe matchare anche il pattern NC.
-    Deve vincere dual_use perché viene prima nel registry."""
-    entry, code = detect_code_from_registry("2B002")
-    assert entry["id"] == "dual_use"
+    Deve vincere dual_use perché viene prima nel registry.
+    2B002 non contiene 4+ cifre consecutive → solo dual_use matcha."""
+    matches = detect_code_from_registry("2B002")
+    assert matches[0][0]["id"] == "dual_use"
+    assert len(matches) == 1
 
 
 # ── Rilevamento codice NC (nomenclature) ────────────────────────────────────
@@ -83,15 +90,27 @@ def test_detect_dual_use_priority_over_nomenclature():
     ("cosa è la voce 2507", "2507"),
 ])
 def test_detect_nomenclature(query, expected_code):
-    entry, code = detect_code_from_registry(query)
-    assert entry is not None
-    assert entry["id"] == "nomenclature"
-    assert code == expected_code
+    matches = detect_code_from_registry(query)
+    assert len(matches) >= 1
+    assert matches[0][0]["id"] == "nomenclature"
+    assert matches[0][1] == expected_code
+    # I codici NC devono matchare anche dual_use_correlations
+    assert len(matches) == 2
+    assert matches[1][0]["id"] == "dual_use_correlations"
 
 def test_detect_nomenclature_not_dual_use():
     """8544 non deve essere rilevato come dual-use."""
-    entry, _ = detect_code_from_registry("voce 8544")
-    assert entry["id"] == "nomenclature"
+    matches = detect_code_from_registry("voce 8544")
+    assert matches[0][0]["id"] == "nomenclature"
+
+def test_nomenclature_code_also_matches_dual_use_correlations():
+    r"""Un codice NC (es. 8544) deve restituire due match:
+    nomenclature e dual_use_correlations (stesso pattern \b\d{4,10}\b)."""
+    matches = detect_code_from_registry("8544")
+    ids = [e["id"] for e, _ in matches]
+    assert "nomenclature" in ids
+    assert "dual_use_correlations" in ids
+    assert len(matches) == 2
 
 
 # ── Nessun match ─────────────────────────────────────────────────────────────
@@ -103,11 +122,9 @@ def test_detect_nomenclature_not_dual_use():
     "",
 ])
 def test_no_match(query):
-    entry, code = detect_code_from_registry(query)
-    assert entry is None
-    assert code is None
+    matches = detect_code_from_registry(query)
+    assert matches == []
 
 def test_none_input():
-    entry, code = detect_code_from_registry(None)
-    assert entry is None
-    assert code is None
+    matches = detect_code_from_registry(None)
+    assert matches == []

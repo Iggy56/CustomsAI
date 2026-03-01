@@ -10,14 +10,15 @@ Il sistema è deterministico, tracciabile e auditabile: nessun routing basato su
 ```
 Domanda
   │
-  ├─ detect_intent()          → codice_diretto | procedurale | classificazione | generico
-  ├─ detect_code_from_registry() → (entry, codice) dal registry config-driven
+  ├─ detect_intent()              → codice_diretto | procedurale | classificazione | generico
+  ├─ detect_code_from_registry()  → list[(entry, codice)] — tutti i match dal registry
+  │     (es. "8544" → [nomenclature/"8544", dual_use_correlations/"8544"])
   │
-  ├─ CODE_SPECIFIC → lookup_collateral() → output diretto (nessun LLM)
-  ├─ PROCEDURAL   → lookup_collateral() + vector_search() → LLM
+  ├─ CODE_SPECIFIC → for entry,code in matches: lookup_collateral() → output diretto (nessun LLM)
+  ├─ PROCEDURAL   → for entry,code in matches: lookup_collateral() + vector_search() → LLM
   └─ GENERIC/CLASS → vector_search() → LLM
        │
-       └─ Fonti stampate da Python (deterministicamente)
+       └─ Fonti stampate da Python (solo per entry con risultati)
 ```
 
 **Registry-first**: ogni DB collaterale è definito in `registry.py`.
@@ -158,10 +159,15 @@ tests/
 
 ## DB collaterali registrati
 
-| ID | Tabella | Pattern | Fonte |
-|----|---------|---------|-------|
-| `dual_use` | `dual_use_items` | `[0-9][A-Z][0-9]{3}` (es. 2B002) | CELEX dal campo DB |
-| `nomenclature` | `nomenclature` | `\d{4,10}` (es. 8544) | Reg. CEE 2658/87 (statico) |
+| ID | Tabella | Pattern | Match | Fonte |
+|----|---------|---------|-------|-------|
+| `dual_use` | `dual_use_items` | `[0-9][A-Z][0-9]{3}` (es. 2B002) | exact | CELEX dal campo DB |
+| `nomenclature` | `nomenclature` | `\d{4,10}` (es. 8544) | prefix | Reg. CEE 2658/87 (statico) |
+| `dual_use_correlations` | `dual_use_correlations` | `\d{4,10}` (es. 8544) | prefix | Reg. UE 2021/821 (statico) |
+
+`nomenclature` e `dual_use_correlations` condividono il pattern numerico: una query con codice NC
+produce **multi-match** e vengono interrogate entrambe le tabelle. Le fonti compaiono nel footer
+solo per le entry che hanno restituito almeno un risultato.
 
 Per aggiungere un nuovo DB: aggiungi una voce a `REGISTRY` in `registry.py`. Nessun'altra modifica necessaria.
 
@@ -173,7 +179,7 @@ Per aggiungere un nuovo DB: aggiungi una voce a `REGISTRY` in `registry.py`. Nes
 python3 -m pytest tests/ -v
 ```
 
-118 test distribuiti su 3 livelli:
+120 test distribuiti su 3 livelli:
 - **L1** — funzioni pure, nessuna dipendenza esterna
 - **L2** — mock Supabase client
 - **L3** — pipeline end-to-end con mock completo

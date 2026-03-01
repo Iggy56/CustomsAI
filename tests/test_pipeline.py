@@ -22,8 +22,9 @@ from registry import REGISTRY
 
 # ── Dati di fixture ───────────────────────────────────────────────────────────
 
-DUAL_USE_ENTRY    = next(e for e in REGISTRY if e["id"] == "dual_use")
-NOMENCLATURE_ENTRY = next(e for e in REGISTRY if e["id"] == "nomenclature")
+DUAL_USE_ENTRY         = next(e for e in REGISTRY if e["id"] == "dual_use")
+NOMENCLATURE_ENTRY     = next(e for e in REGISTRY if e["id"] == "nomenclature")
+DU_CORRELATIONS_ENTRY  = next(e for e in REGISTRY if e["id"] == "dual_use_correlations")
 
 FAKE_EMBEDDING = [0.0] * 1536
 
@@ -64,7 +65,7 @@ def test_code_specific_dual_use_no_llm(capsys):
     Query con codice dual-use → testo diretto, LLM NON chiamato,
     fonti da celex_field.
     """
-    with patch("main.detect_code_from_registry", return_value=(DUAL_USE_ENTRY, "2B002")), \
+    with patch("main.detect_code_from_registry", return_value=[(DUAL_USE_ENTRY, "2B002")]), \
          patch("retrieval.lookup_collateral", return_value=[DUAL_USE_CHUNK]), \
          patch("retrieval.vector_search") as mock_vec, \
          patch("llm.generate_answer") as mock_llm:
@@ -87,7 +88,7 @@ def test_code_specific_nomenclature_static_celex(capsys):
     """
     Query con codice NC → testo diretto, fonti da static_celex (non da chunk).
     """
-    with patch("main.detect_code_from_registry", return_value=(NOMENCLATURE_ENTRY, "8544")), \
+    with patch("main.detect_code_from_registry", return_value=[(NOMENCLATURE_ENTRY, "8544")]), \
          patch("retrieval.lookup_collateral", return_value=[NC_CHUNK]), \
          patch("llm.generate_answer") as mock_llm:
 
@@ -102,13 +103,42 @@ def test_code_specific_nomenclature_static_celex(capsys):
     mock_llm.assert_not_called()
 
 
+# ── Scenario 2b: multi-match NC (nomenclature=results, correlations=vuoto) ───
+
+def test_code_specific_nc_partial_match_no_du_source(capsys):
+    """
+    Query con codice NC che matcha due entry (nomenclature + dual_use_correlations).
+    nomenclature restituisce risultati, dual_use_correlations restituisce vuoto.
+    → La fonte DU NON deve comparire nelle FONTI NORMATIVE.
+    """
+    NC_MATCH = [(NOMENCLATURE_ENTRY, "8708"), (DU_CORRELATIONS_ENTRY, "8708")]
+
+    def _side_effect(entry, code):
+        if entry["id"] == "nomenclature":
+            return [NC_CHUNK]
+        return []   # dual_use_correlations: 0 risultati
+
+    with patch("main.detect_code_from_registry", return_value=NC_MATCH), \
+         patch("retrieval.lookup_collateral", side_effect=_side_effect), \
+         patch("llm.generate_answer") as mock_llm:
+
+        from main import run
+        run("cosa è la voce 8708")
+
+    out = capsys.readouterr().out
+    assert "TESTO NORMATIVO" in out
+    assert "31987R2658" in out          # fonte nomenclature presente
+    assert "32021R0821" not in out      # fonte DU assente (0 risultati)
+    mock_llm.assert_not_called()
+
+
 # ── Scenario 3: CODE_SPECIFIC con lookup vuoto → fallback vector + LLM ───────
 
 def test_code_specific_fallback_to_vector(capsys):
     """
     Lookup collaterale vuoto → fallback a vector search → LLM interpretativo.
     """
-    with patch("main.detect_code_from_registry", return_value=(DUAL_USE_ENTRY, "9Z999")), \
+    with patch("main.detect_code_from_registry", return_value=[(DUAL_USE_ENTRY, "9Z999")]), \
          patch("retrieval.lookup_collateral", return_value=[]), \
          _patch_embedding(), \
          patch("retrieval.vector_search", return_value=[ARTICLE_CHUNK]), \
@@ -128,7 +158,7 @@ def test_procedural_with_code(capsys):
     """
     Query procedurale con codice → collaterale + vector search → LLM.
     """
-    with patch("main.detect_code_from_registry", return_value=(DUAL_USE_ENTRY, "2B002")), \
+    with patch("main.detect_code_from_registry", return_value=[(DUAL_USE_ENTRY, "2B002")]), \
          patch("retrieval.lookup_collateral", return_value=[DUAL_USE_CHUNK]), \
          _patch_embedding(), \
          patch("retrieval.vector_search", return_value=[ARTICLE_CHUNK]), \
@@ -153,7 +183,7 @@ def test_generic_no_code(capsys):
     """
     Query senza codice → vector search globale → LLM interpretativo.
     """
-    with patch("main.detect_code_from_registry", return_value=(None, None)), \
+    with patch("main.detect_code_from_registry", return_value=[]), \
          _patch_embedding(), \
          patch("retrieval.vector_search", return_value=[ARTICLE_CHUNK]), \
          patch("llm.generate_answer", return_value=MOCK_LLM_ANSWER) as mock_llm:
@@ -179,7 +209,7 @@ def test_classification_uses_annex_code_filter(capsys):
         "similarity": 0.9,
     }
 
-    with patch("main.detect_code_from_registry", return_value=(None, None)), \
+    with patch("main.detect_code_from_registry", return_value=[]), \
          _patch_embedding(), \
          patch("retrieval.vector_search", return_value=[annex_chunk]) as mock_vec, \
          patch("llm.generate_answer", return_value=MOCK_LLM_ANSWER):
@@ -198,7 +228,7 @@ def test_no_results_exits(capsys):
     """
     Se non ci sono risultati, la pipeline stampa messaggio e termina.
     """
-    with patch("main.detect_code_from_registry", return_value=(None, None)), \
+    with patch("main.detect_code_from_registry", return_value=[]), \
          _patch_embedding(), \
          patch("retrieval.vector_search", return_value=[]):
 

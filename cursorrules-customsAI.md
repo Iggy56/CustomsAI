@@ -1,4 +1,4 @@
-# .cursorrules – CustomsAI v4
+# .cursorrules – CustomsAI v5
 
 ## 1. Missione attuale del sistema
 
@@ -155,7 +155,7 @@ REGISTRY = [
         "pattern": r"\b\d{4,10}\b",              # es. 8544
         "label": "Nomenclatura Combinata",
         "match_mode": "prefix",
-        "display_code_field": "goods_code",
+        "display_code_field": "goods_code",      # codice + gerarchia visiva
         "source": {
             "type": "static_celex",
             "celex": "31987R2658",
@@ -163,14 +163,39 @@ REGISTRY = [
             "label": "Nomenclatura Combinata (Reg. CEE 2658/87)",
         },
     },
+    {
+        "id": "dual_use_correlations",
+        "table": "dual_use_correlations",
+        "code_field": "cn_codes_2026",
+        "text_field": "dual_use_codification",
+        "pattern": r"\b\d{4,10}\b",              # stesso pattern di nomenclature → multi-match
+        "label": "Dual Use Correlations",
+        "match_mode": "prefix",
+        "display_code_field": "cn_codes_2026",   # mostra "8704229100  9A115b"
+        "source": {
+            "type": "static_celex",
+            "celex": "32021R0821",
+            "url": "https://eur-lex.europa.eu/legal-content/IT/TXT/?uri=CELEX:32021R0821",
+            "label": "Regolamento UE 2021/821 (Beni a duplice uso)",
+        },
+    },
 ]
 ```
 
-### Priorità dei pattern
+Note:
+- `dual_use_correlations` e `nomenclature` condividono il pattern `\b\d{4,10}\b`: una query con codice NC (es. `8544`)
+  produce **due match** e viene eseguito `lookup_collateral` su entrambe le tabelle.
+- Ogni riga di `dual_use_correlations` è una coppia `cn_codes_2026 (10 cifre) → dual_use_codification`.
+- La struttura `{codice NC}  {codice DU}` è resa visibile grazie a `display_code_field: "cn_codes_2026"`.
 
-I pattern sono scansionati nell'ordine in cui appaiono in `REGISTRY`.
-Il **primo match vince**. L'ordine è significativo: `dual_use` prima di `nomenclature`
-per evitare che codici come `2B002` (che contiene cifre) vengano catturati dal pattern numerico.
+### Multi-match
+
+`detect_code_from_registry()` scansiona **tutti** i pattern in ordine e restituisce **tutti i match**
+(non si ferma al primo). Due entry con lo stesso pattern (es. `nomenclature` e `dual_use_correlations`,
+entrambe con `\b\d{4,10}\b`) vengono restituite entrambe e processate in sequenza.
+
+L'ordine rimane significativo: `dual_use` precede `nomenclature` per garantire che codici come `2B002`
+(che NON contiene ≥4 cifre consecutive) matchino solo `dual_use` e non producano multi-match.
 
 ---
 
@@ -210,38 +235,43 @@ File **non modificare** senza motivo: `structured_lookup.py` (deprecato, non usa
 ```
 User Question
 ↓
-detect_intent (keyword-based, deterministico)         → retrieval.py
+detect_intent (keyword-based, deterministico)              → retrieval.py
 ↓
-detect_code_from_registry (scan pattern REGISTRY)     → registry.py
+detect_code_from_registry (scan tutti i pattern REGISTRY)  → registry.py
+│  Restituisce list[tuple[dict, str]] — tutti i match
 │
-├─ Codice rilevato
+├─ Match trovati (es. [nomenclature/"8544", dual_use_correlations/"8544"])
 │   ├─ intent = CODE_SPECIFIC
-│   │       → lookup_collateral(entry, code)           → retrieval.py
-│   │       → se risultati: TESTO DIRETTO, no LLM
-│   │       → se vuoto: fallback vector search
+│   │       → for entry, code in registry_matches:
+│   │             lookup_collateral(entry, code)            → retrieval.py
+│   │             (traccia active_entries solo se > 0 risultati)
+│   │       → se almeno 1 risultato: TESTO DIRETTO, no LLM
+│   │       → se tutto vuoto: fallback vector search
 │   │
 │   └─ intent = PROCEDURAL
-│           → lookup_collateral(entry, code)           → retrieval.py
-│           → vector_search(embedding)                 → retrieval.py
+│           → for entry, code in registry_matches:
+│                 lookup_collateral(entry, code)            → retrieval.py
+│           → vector_search(embedding)                      → retrieval.py
 │           → combined context → LLM INTERPRETATIVO
 │
-└─ Nessun codice
+└─ Nessun match (registry_matches = [])
     ├─ intent = CLASSIFICATION
-    │       → vector_search(embedding, ["ANNEX_CODE"]) → retrieval.py
+    │       → vector_search(embedding, ["ANNEX_CODE"])      → retrieval.py
     │       → se vuoto: fallback global vector search
     │       → LLM INTERPRETATIVO
     │
     └─ intent = GENERIC
-            → vector_search(embedding)                 → retrieval.py
+            → vector_search(embedding)                      → retrieval.py
             → LLM INTERPRETATIVO
 ↓
-format_context(chunks)                                 → prompt.py
+format_context(chunks)                                      → prompt.py
 ↓
-generate_answer(question, context)                     → llm.py
+generate_answer(question, context)                          → llm.py
 ↓
 Risposta
 ↓
-_print_normative_sources(chunks, registry_entry)       → main.py
+_print_normative_sources(chunks, active_entries)            → main.py
+  (solo entry con ≥1 risultato collaterale)
 ```
 
 ---
@@ -251,10 +281,18 @@ _print_normative_sources(chunks, registry_entry)       → main.py
 ### 7.1 Rilevamento codice
 
 `detect_code_from_registry(query)` in `registry.py`:
-- Scansiona `REGISTRY` in ordine
+- Scansiona **tutti** i pattern in `REGISTRY` in ordine
 - Pattern compilati con `re.IGNORECASE`
 - Il codice è normalizzato in **UPPERCASE** prima del lookup
-- Restituisce `(entry, codice)` o `(None, None)`
+- Restituisce `list[tuple[dict, str]]` — lista di `(entry, codice)` per ogni match, oppure `[]`
+
+La pipeline in `main.py` itera su tutti i match:
+```python
+registry_matches = detect_code_from_registry(q)   # list[tuple[dict, str]]
+for entry, code in registry_matches:
+    results = retrieval.lookup_collateral(entry, code)
+    ...
+```
 
 È vietato:
 - Hardcodare pattern di codice in `retrieval.py`, `main.py` o qualsiasi altro file
@@ -303,7 +341,7 @@ Richiede: `celex`, `url`, `label` nell'entry del registry.
 ---
 FONTI NORMATIVE (deterministiche)
 
-Nomenclatura Combinata (Reg. CEE 2658/87)    ← solo se static_celex
+Nomenclatura Combinata (Reg. CEE 2658/87)    ← solo se static_celex E ha prodotto risultati
 CELEX: 31987R2658
 https://eur-lex.europa.eu/...
 
@@ -314,6 +352,15 @@ https://eur-lex.europa.eu/...
 ```
 
 I due tipi non sono esclusivi: in un routing PROCEDURAL con codice, entrambi possono comparire.
+
+### Regola `active_entries`
+
+`_print_normative_sources(chunks, active_entries)` riceve solo le entry che hanno prodotto
+**almeno un risultato** dal lookup collaterale. Le entry con 0 risultati non vengono incluse
+e la loro fonte non compare nel footer — anche se il loro pattern ha matchato la query.
+
+Esempio: query `8708` → `nomenclature` restituisce 15 risultati, `dual_use_correlations` ne restituisce 0
+→ solo la fonte `Nomenclatura Combinata` compare nel footer.
 
 ---
 
@@ -443,11 +490,13 @@ Quando si aggiunge una nuova tabella Supabase a CustomsAI:
 
 ```
 tests/
-├── test_registry.py   L1 – struttura REGISTRY, pattern dual-use e NC, priorità, case-insensitive
+├── test_registry.py   L1 – struttura REGISTRY, pattern dual-use/NC/correlations,
+│                           multi-match (8544 → 2 entry), case-insensitive
 ├── test_intent.py     L1 – keyword detection, priorità PROCEDURAL > CLASSIFICATION
 ├── test_sources.py    L1 – fonti celex_field/static_celex, deduplicazione, output vuoto
 ├── test_retrieval.py  L2 – lookup_collateral (exact/prefix/display_code), vector_search (mock)
-├── test_pipeline.py   L3 – run() end-to-end: 7 scenari (code_specific, NC, fallback,
+├── test_pipeline.py   L3 – run() end-to-end: 9 scenari (code_specific dual-use/NC,
+│                           multi-match NC con DU-correlations vuoto, fallback,
 │                           procedural+code, generic, classification, no results)
 └── test_scan_db.py    L1 – detect_pattern, detect_match_mode, _match_registry_patterns,
                             ScanResult.status, render_json/text, _draft_dict
@@ -532,7 +581,20 @@ Ogni fase deve essere validata prima di evolvere.
 
 ## 19. Changelog
 
-### v4 (corrente)
+### v5 (corrente)
+- **Multi-match registry**: `detect_code_from_registry()` restituisce ora `list[tuple[dict, str]]`
+  con tutti i match (non solo il primo). La pipeline itera su ogni match per `lookup_collateral`.
+- **Nuova entry**: `dual_use_correlations` (`cn_codes_2026 → dual_use_codification`, prefix match,
+  CELEX 32021R0821). Condivide il pattern `\b\d{4,10}\b` con `nomenclature` → multi-match per codici NC.
+- **`display_code_field` su `dual_use_correlations`**: l'output mostra `"8704229100  9A115b"`
+  invece del solo codice DU, rendendo visibile il mapping NC → DU.
+- **`active_entries`**: `_print_normative_sources` riceve solo le entry che hanno prodotto ≥1
+  risultato. Le fonti delle entry con 0 risultati non compaiono nel footer (es. 8708 non ha
+  correlazioni DU → fonte Reg. 2021/821 non stampata).
+- Suite di test: 120 test (aggiunto `test_code_specific_nc_partial_match_no_du_source` e
+  `test_nomenclature_code_also_matches_dual_use_correlations`).
+
+### v4
 - Implementato registry-first completo: `registry.py` con `detect_code_from_registry()`
 - `retrieval.py` riscritto: rimossi pattern hardcoded, aggiunti `lookup_collateral()` e `vector_search()`
 - `main.py` riscritto: routing a due variabili (intent + code), `_print_normative_sources()` gestisce `celex_field` e `static_celex`
@@ -540,7 +602,7 @@ Ogni fase deve essere validata prima di evolvere.
 - Aggiornato `supabase_rpc.sql`: funzione `search_chunks_multi_type` con `vector(1536)` e `type_filters`
 - Aggiunto `tools/scan_db.py`: scanner automatizzato con validazione registry e profiling nuove tabelle
 - Aggiunto `tools/catalog.sql`: 3 funzioni RPC Supabase per introspezione
-- Suite di test progressiva: 118 test su 6 file (L1 unit, L2 mock, L3 e2e)
+- Suite di test progressiva: 119 test su 6 file (L1 unit, L2 mock, L3 e2e)
 - Formalizzata procedura onboarding nuovo DB (7 passi, solo `registry.py` da modificare)
 - Fase 2 completata
 
