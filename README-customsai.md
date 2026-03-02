@@ -82,7 +82,20 @@ Crea tre funzioni di introspezione:
 
 ## Utilizzo
 
-### Query normativa
+### Interfaccia web (Streamlit)
+
+```bash
+python3 -m streamlit run app.py
+```
+
+Apre l'UI nel browser. Funzionalità:
+- Form di input con spinner durante l'elaborazione
+- Expander "Routing" (collassato) con i log di routing
+- Testo normativo diretto o risposta LLM
+- Fonti normative con link CELEX cliccabili
+- Storico delle domande della sessione
+
+### CLI
 
 ```bash
 python3 main.py "Cosa prevede il codice 2B002?"
@@ -131,8 +144,9 @@ Il report include:
 ## Struttura del progetto
 
 ```
+main.py               # Pipeline orchestratore: query() → QueryResult, run() (CLI wrapper)
+app.py                # Interfaccia web Streamlit
 registry.py           # Config-driven: REGISTRY list + detect_code_from_registry()
-main.py               # Pipeline orchestratore
 config.py             # Variabili env e costanti
 embeddings.py         # Generazione embedding (OpenAI)
 retrieval.py          # Retrieval: detect_intent, lookup_collateral, vector_search

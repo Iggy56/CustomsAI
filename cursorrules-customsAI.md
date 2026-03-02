@@ -203,7 +203,8 @@ L'ordine rimane significativo: `dual_use` precede `nomenclature` per garantire c
 
 ```
 CustomsAI/
-├── main.py              # Pipeline orchestratore (routing a due variabili)
+├── main.py              # Pipeline orchestratore: query() + run() (wrapper CLI)
+├── app.py               # Interfaccia web Streamlit (chiama query() direttamente)
 ├── config.py            # Env vars, costanti (modelli, TOP_K, MAX_CONTEXT_CHARS)
 ├── registry.py          # REGISTRY + detect_code_from_registry() ← unico punto di config
 ├── retrieval.py         # Primitivi DB: detect_intent(), lookup_collateral(), vector_search()
@@ -232,46 +233,78 @@ File **non modificare** senza motivo: `structured_lookup.py` (deprecato, non usa
 
 ## 6. Pipeline obbligatoria
 
+### Funzione `query(question) -> QueryResult`
+
+Tutta la logica computazionale è in `query()`. Nessun print al suo interno:
+i messaggi di routing vanno in `result["log"]`. Usata da CLI (`run()`) e Streamlit (`app.py`).
+
 ```
-User Question
-↓
-detect_intent (keyword-based, deterministico)              → retrieval.py
-↓
-detect_code_from_registry (scan tutti i pattern REGISTRY)  → registry.py
-│  Restituisce list[tuple[dict, str]] — tutti i match
-│
-├─ Match trovati (es. [nomenclature/"8544", dual_use_correlations/"8544"])
-│   ├─ intent = CODE_SPECIFIC
-│   │       → for entry, code in registry_matches:
-│   │             lookup_collateral(entry, code)            → retrieval.py
-│   │             (traccia active_entries solo se > 0 risultati)
-│   │       → se almeno 1 risultato: TESTO DIRETTO, no LLM
-│   │       → se tutto vuoto: fallback vector search
-│   │
-│   └─ intent = PROCEDURAL
-│           → for entry, code in registry_matches:
-│                 lookup_collateral(entry, code)            → retrieval.py
-│           → vector_search(embedding)                      → retrieval.py
-│           → combined context → LLM INTERPRETATIVO
-│
-└─ Nessun match (registry_matches = [])
-    ├─ intent = CLASSIFICATION
-    │       → vector_search(embedding, ["ANNEX_CODE"])      → retrieval.py
-    │       → se vuoto: fallback global vector search
-    │       → LLM INTERPRETATIVO
-    │
-    └─ intent = GENERIC
-            → vector_search(embedding)                      → retrieval.py
-            → LLM INTERPRETATIVO
-↓
-format_context(chunks)                                      → prompt.py
-↓
-generate_answer(question, context)                          → llm.py
-↓
-Risposta
-↓
-_print_normative_sources(chunks, active_entries)            → main.py
-  (solo entry con ≥1 risultato collaterale)
+query(question: str) -> QueryResult
+  ↓
+  detect_intent (keyword-based, deterministico)              → retrieval.py
+  ↓
+  detect_code_from_registry (scan tutti i pattern REGISTRY)  → registry.py
+  │  Restituisce list[tuple[dict, str]] — tutti i match
+  │
+  ├─ Match trovati (es. [nomenclature/"8544", dual_use_correlations/"8544"])
+  │   ├─ intent = CODE_SPECIFIC
+  │   │       → for entry, code in registry_matches:
+  │   │             lookup_collateral(entry, code)            → retrieval.py
+  │   │             (traccia active_entries solo se > 0 risultati)
+  │   │       → se almeno 1 risultato: QueryResult(mode="direct", chunks=..., sources=...)
+  │   │       → se tutto vuoto: fallback vector search
+  │   │
+  │   └─ intent = PROCEDURAL
+  │           → for entry, code in registry_matches:
+  │                 lookup_collateral(entry, code)            → retrieval.py
+  │           → vector_search(embedding)                      → retrieval.py
+  │           → combined context → LLM INTERPRETATIVO
+  │           → QueryResult(mode="llm", answer=..., sources=...)
+  │
+  └─ Nessun match (registry_matches = [])
+      ├─ intent = CLASSIFICATION
+      │       → vector_search(embedding, ["ANNEX_CODE"])      → retrieval.py
+      │       → se vuoto: fallback global vector search
+      │       → LLM INTERPRETATIVO
+      │       → QueryResult(mode="llm", ...)
+      │
+      └─ intent = GENERIC
+              → vector_search(embedding)                      → retrieval.py
+              → LLM INTERPRETATIVO
+              → QueryResult(mode="llm", ...)
+  ↓
+  _build_sources(chunks, active_entries) → list[dict]        → main.py
+    (fonti costruite in modo puro, nessun print)
+```
+
+### `QueryResult` (TypedDict)
+
+```python
+class QueryResult(TypedDict):
+    mode:    str          # "direct" | "llm" | "empty"
+    intent:  str          # valore dell'Intent enum (es. "code_specific")
+    codes:   list[str]    # codici rilevati (es. ["8544"])
+    dbs:     list[str]    # ID entry con ≥1 risultato (es. ["nomenclature"])
+    chunks:  list[dict]   # raw chunks
+    answer:  str | None   # risposta LLM (solo mode="llm")
+    sources: list[dict]   # [{"label": str|None, "celex": str, "url": str}]
+    log:     list[str]    # messaggi di routing/debug
+```
+
+### Wrapper CLI `run(question)`
+
+```
+run(question: str) → None
+  ↓
+  query(question) → QueryResult
+  ↓
+  stampa result["log"]
+  ↓
+  mode="direct"  → _display_direct_text(chunks)
+  mode="llm"     → stampa answer
+  mode="empty"   → "Nessun risultato trovato." + sys.exit(0)
+  ↓
+  _render_sources(result["sources"])
 ```
 
 ---
@@ -322,8 +355,20 @@ Regola di override in `main.py`:
 
 ## 8. Fonti normative
 
-Le fonti sono sempre stampate deterministicamente da `_print_normative_sources()` in `main.py`.
-**Mai generate dall'LLM.**
+Le fonti sono costruite deterministicamente da `_build_sources()` e mai generate dall'LLM.
+
+### Helper per le fonti
+
+**`_build_sources(chunks, active_entries) -> list[dict]`** — funzione pura, nessun print.
+Restituisce lista di dict `{"label": str|None, "celex": str, "url": str}`.
+
+**`_render_sources(sources: list[dict])`** — stampa nel formato testuale standard.
+Usata da `run()`.
+
+**`_print_normative_sources(chunks, registry_entries)`** — firma invariata (backward compat.
+per `test_sources.py`). Internamente chiama `_build_sources + _render_sources`.
+
+In Streamlit (`app.py`) le fonti sono rese come link Markdown cliccabili, iterando `result["sources"]`.
 
 ### `celex_field`
 La fonte è letta dal campo `celex_consolidated` della riga restituita.
@@ -355,9 +400,9 @@ I due tipi non sono esclusivi: in un routing PROCEDURAL con codice, entrambi pos
 
 ### Regola `active_entries`
 
-`_print_normative_sources(chunks, active_entries)` riceve solo le entry che hanno prodotto
+`_build_sources(chunks, active_entries)` riceve solo le entry che hanno prodotto
 **almeno un risultato** dal lookup collaterale. Le entry con 0 risultati non vengono incluse
-e la loro fonte non compare nel footer — anche se il loro pattern ha matchato la query.
+e la loro fonte non compare — anche se il loro pattern ha matchato la query.
 
 Esempio: query `8708` → `nomenclature` restituisce 15 risultati, `dual_use_correlations` ne restituisce 0
 → solo la fonte `Nomenclatura Combinata` compare nel footer.
@@ -514,13 +559,19 @@ I test di struttura (`test_registry.py`) verificano automaticamente ogni nuova e
 
 ## 14. Logging obbligatorio
 
-Stampare:
-
+**In `query()`** i messaggi di routing non vengono stampati ma accumulati in `result["log"]`:
 - `[routing] intent=… | code=… | db=…`
+- `[routing] nessun risultato collaterale → fallback vector search`
+- `[normalization] embedding query: …`
+- `[routing] nessun risultato con filtri=… → fallback global`
+
+**In `retrieval.py`** i messaggi vengono stampati direttamente su stdout (visibili sia in CLI che in Streamlit su terminale):
 - `[collateral] {id} | {match_mode} '{code}' → N risultati`
 - `[vector] type_filters=… → N risultati`
-- `[normalization] embedding query: …`
-- risposta finale e fonti
+
+**In `run()`** i messaggi di `result["log"]` vengono stampati prima della risposta.
+
+**In `app.py`** i messaggi di `result["log"]` vengono mostrati in un expander "Routing" (collassato).
 
 ---
 
@@ -560,6 +611,8 @@ La versione è valida se:
 ✔ Routing procedurale con codice combina DB collaterale + chunks
 ✔ Aggiungere un nuovo DB = solo una entry in `registry.py`
 ✔ Nessuna hallucination normativa
+✔ `python3 main.py "domanda"` → output CLI identico alla versione precedente
+✔ `python3 -m streamlit run app.py` → UI aperta in browser, query funzionante
 
 ---
 
@@ -572,6 +625,7 @@ CustomsAI evolve per fasi controllate:
 
 Fase 1 – Retrieval stabile su chunks ✅
 Fase 2 – Registry multi-DB + retrieval unificato ✅
+Fase 2b – Interfaccia web Streamlit (`app.py`) ✅
 Fase 3 – Motore decisionale
 Fase 4 – Reasoning normativo avanzato
 
@@ -581,7 +635,20 @@ Ogni fase deve essere validata prima di evolvere.
 
 ## 19. Changelog
 
-### v5 (corrente)
+### v6 (corrente)
+- **`query(question) -> QueryResult`**: estratta da `run()`. Tutta la logica computazionale
+  senza print. I messaggi di routing accumulati in `result["log"]`. Usata da CLI e Streamlit.
+- **`QueryResult`** TypedDict: `mode, intent, codes, dbs, chunks, answer, sources, log`.
+- **`_build_sources(chunks, active_entries) -> list[dict]`**: funzione pura per costruire le fonti.
+- **`_render_sources(sources)`**: stampa le fonti nel formato standard. Usata da `run()`.
+- **`_print_normative_sources`**: firma invariata (backward compat.), delega a `_build_sources + _render_sources`.
+- **`_run_llm_and_print`**: rimossa (logica spostata in `query()`).
+- **`app.py`**: nuova interfaccia web Streamlit. Avvio: `python3 -m streamlit run app.py`.
+  Form input, spinner, expander routing, testo/risposta/fonti cliccabili, storico sessione.
+- **`requirements.txt`**: aggiunto `streamlit>=1.30.0`.
+- Suite di test: 120 test — nessuna regressione.
+
+### v5
 - **Multi-match registry**: `detect_code_from_registry()` restituisce ora `list[tuple[dict, str]]`
   con tutti i match (non solo il primo). La pipeline itera su ogni match per `lookup_collateral`.
 - **Nuova entry**: `dual_use_correlations` (`cn_codes_2026 → dual_use_codification`, prefix match,
