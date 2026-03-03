@@ -7,7 +7,7 @@ CLI invariato: python3 main.py "domanda"
 
 import streamlit as st
 
-from main import query
+from main import query, _format_eurlex_text
 
 
 # ── Helper: rendering di un singolo risultato ─────────────────────────────────
@@ -29,7 +29,12 @@ def _render_entry(question: str, result: dict, show_question: bool = True) -> No
     elif result["mode"] == "direct":
         st.subheader("Testo normativo")
         for chunk in result["chunks"]:
-            st.text(chunk.get("chunk_text", ""))
+            raw = chunk.get("chunk_text", "")
+            # Opzione A: testo formattato in markdown (best-effort)
+            st.markdown(_format_eurlex_text(raw))
+            # Opzione B: testo originale EUR-Lex in monospace (sempre corretto)
+            with st.expander("Testo originale EUR-Lex", expanded=False):
+                st.code(raw, language=None)
             st.divider()
 
     else:  # mode == "llm"

@@ -136,12 +136,58 @@ def lookup_collateral(entry: dict, code: str, top_k: int | None = None) -> list[
 
         results.append({
             "chunk_text":         chunk_text,
-            "metadata":           {"code": r.get(code_field), "source_id": entry["id"]},
+            "metadata":           {
+                "code":       r.get(code_field),
+                "source_id":  entry["id"],
+                "text_value": str(r.get(text_field, "")),  # valore raw del text_field
+            },
             "celex_consolidated":  r.get("celex_consolidated"),
             "similarity":         1.0,
         })
 
     return results
+
+
+# ============================================================
+# Annex chunk lookup per codice (Opzione A – Fase 3)
+# ============================================================
+
+def get_annex_chunks_by_codes(codes: list[str]) -> list[ChunkRow]:
+    """
+    Recupera i chunk di tipo ANNEX_CODE dalla tabella chunks filtrati per codice.
+    Usato in Fase 3 per ottenere la definizione normativa esatta dei codici DU
+    collegati tramite dual_use_correlations.
+
+    Usa una query diretta (no vector) su metadata->>'code'.
+    metadata.code è popolato SOLO per unit_type=ANNEX_CODE, quindi il filtro
+    restituisce naturalmente solo le voci dell'allegato.
+    """
+    if not codes:
+        return []
+
+    client = _get_client()
+    all_rows: list[dict] = []
+
+    for code in codes:
+        resp = (
+            client.table("chunks")
+            .select("text, metadata, celex_consolidated, source_url")
+            .filter("metadata->>code", "eq", code)
+            .execute()
+        )
+        all_rows.extend(resp.data or [])
+
+    print(f"[annex] codes={codes} → {len(all_rows)} risultati")
+
+    return [
+        {
+            "chunk_text":         r["text"],
+            "metadata":           _parse_metadata(r.get("metadata")),
+            "celex_consolidated": r.get("celex_consolidated"),
+            "similarity":         1.0,
+        }
+        for r in all_rows
+    ]
 
 
 # ============================================================

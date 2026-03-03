@@ -14,6 +14,9 @@ Struttura di ogni entry:
     pattern     – regex per riconoscere il codice nell'input utente
     label       – etichetta human-readable
     match_mode  – "exact" | "prefix"
+    links_to    – (opzionale) id di un'altra entry del registry a cui i risultati fanno
+                  riferimento. I valori del text_field di questa tabella sono codici
+                  dell'entry indicata. Usato per costruire il grafo di correlazioni (Fase 3).
     source      – configurazione fonte:
                     {"type": "celex_field"}               → CELEX letto dalla riga
                     {"type": "static_celex", "celex": …}  → CELEX fisso
@@ -64,6 +67,9 @@ REGISTRY: list[dict] = [
         # display_code_field: il codice NC viene anteposto alla codifica DU
         # in modo da mostrare "8704229100  9A115b" invece del solo "9A115b"
         "display_code_field": "cn_codes_2026",
+        # links_to: i valori di text_field (dual_use_codification) sono codici
+        # dell'entry "dual_use" → usato per costruire il grafo di correlazioni NC→DU
+        "links_to": "dual_use",
         "source": {
             "type": "static_celex",
             "celex": "32021R0821",

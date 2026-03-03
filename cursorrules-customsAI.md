@@ -1,4 +1,4 @@
-# .cursorrules – CustomsAI v5
+# .cursorrules – CustomsAI v7
 
 ## 1. Missione attuale del sistema
 
@@ -6,7 +6,6 @@ CustomsAI è un **motore normativo AI-first** per interrogare normativa struttur
 e sistemi di classificazione doganale, con comportamento deterministico, tracciabile e verificabile.
 
 Obiettivo:
-
 - ricevere una domanda
 - determinare il tipo di interrogazione e il codice eventualmente presente
 - eseguire retrieval sul DB corretto tramite registry config-driven
@@ -14,93 +13,53 @@ Obiettivo:
 - garantire tracciabilità delle fonti
 - impedire hallucination normativa
 
-Il sistema deve essere:
-
-✔ generico
-✔ domain-agnostic
-✔ deterministico
-✔ scalabile
-✔ auditabile
+Il sistema deve essere: ✔ generico ✔ domain-agnostic ✔ deterministico ✔ scalabile ✔ auditabile
 
 ---
 
 ## 2. Principi architetturali obbligatori
 
-### Separazione dei layer
+**Separazione dei layer** — Parsing ≠ Chunking ≠ Embedding ≠ Retrieval ≠ LLM. Nessuna logica cross-layer.
 
-Parsing ≠ Chunking ≠ Embedding ≠ Retrieval ≠ LLM
+**Determinismo** — Nessun routing LLM. Nessuna fonte generata dall'LLM. Nessuna conoscenza esterna.
 
-Nessuna logica cross-layer.
+**Database-first** — Se un dato non è nel DB non può essere citato né dedotto.
 
-### Determinismo
-
-- Nessuna dipendenza da LLM per routing
-- Nessun filtro post-ranking lato Python
-- Nessuna generazione di fonti da parte dell'LLM
-- Nessuna conoscenza esterna
-
-### Database-first
-
-Il database è la fonte di verità normativa.
-
-Se un dato non è nel DB → non può essere citato né dedotto.
-
-### Registry-first
-
-Il routing verso i DB collaterali è guidato esclusivamente da `registry.py`.
-
+**Registry-first** — Il routing verso i DB collaterali è guidato esclusivamente da `registry.py`.
 Nessun pattern di codice o nome di tabella è hardcoded nel codice di retrieval.
 
 ---
 
 ## 3. Architettura del database
 
-Il sistema opera su tre tabelle Supabase:
+### `chunks` (Layer 1)
 
-### `chunks` (DB principale – Layer 1 Vectorize)
-
-Contiene le unità normative estratte da Eur-Lex (articoli, allegati, codici dual-use).
-
-Campi rilevanti:
-- `text` – testo del chunk
-- `embedding vector(1536)` – embedding OpenAI text-embedding-3-small
-- `metadata jsonb` – `unit_type`, `celex_original`, `celex_consolidated`, `consolidation_date`, `article`, `paragraph`, `letter`, `annex`, `code`
-- `celex_consolidated` – versione consolidata del documento
-- `source_url` – link Eur-Lex
-
+Campi: `text`, `embedding vector(1536)`, `metadata jsonb`, `celex_consolidated`, `source_url`.
 `metadata.code` è popolato SOLO per `unit_type=ANNEX_CODE` (codici dual-use, pattern `[0-9][A-Z][0-9]{3}`).
 
-### `dual_use_items` (DB collaterale – Layer 2 Vectorize)
+### `dual_use_items` (Layer 2 – DB collaterale)
 
-Contiene i codici beni dual-use con descrizione aggregata.
-
-Campi: `code`, `celex_consolidated`, `consolidation_date`, `description`, `created_at`
-
+Campi: `code`, `celex_consolidated`, `consolidation_date`, `description`.
 Match: esatto su `code` (es. `2B002`).
 
-### `nomenclature` (DB collaterale – importata da XLSX)
+### `nomenclature` (DB collaterale)
 
-Contiene l'albero completo della Nomenclatura Combinata UE.
+Campi: `goods_code`, `indent`, `description`, ecc.
+`goods_code` ha formato `{10 cifre} {2 cifre}` (es. `8544000000 80`) — il suffisso viene rimosso nella visualizzazione.
+Match: per prefisso (`LIKE '8544%'`) per restituire l'intera gerarchia.
+`indent=null` = voce principale; `"-"` = primo livello; `"- -"` = secondo, ecc.
 
-Campi: `goods_code`, `start_date`, `end_date`, `language_col`, `hier_pos`, `indent`, `description`, `descr_start_date`, `imported_at`
+### `dual_use_correlations` (DB collaterale)
 
-Note critiche:
-- `goods_code` ha formato `{10 cifre} {2 cifre}` (es. `8544000000 80`) – il suffisso viene rimosso nella visualizzazione
-- Match: per prefisso (`LIKE '8544%'`) per restituire l'intera gerarchia
-- `indent` indica la profondità: `null` = voce principale, `-` = primo livello, `- -` = secondo, ecc.
-- Visualizzazione: `display_code_field` attivo → codice + indentazione gerarchica nel testo
-- Lingua attuale: EN. Versione IT sarà importata quando disponibile
-- Fonte normativa: CELEX `31987R2658` (Reg. CEE 2658/87 – Nomenclatura Combinata)
-- Link: `https://eur-lex.europa.eu/legal-content/IT/ALL/?uri=celex:31987R2658`
+Campi: `cn_codes_2026` (10 cifre), `dual_use_codification`.
+Una riga = un mapping NC → DU. Match: prefisso.
 
 ---
 
 ## 4. Registry dei DB collaterali
 
 Il file `registry.py` è l'**unico punto di configurazione** per i DB collaterali.
-
-Aggiungere un nuovo DB collaterale = aggiungere una entry in `REGISTRY`.
-**Nessun altro file deve essere modificato.**
+Aggiungere un nuovo DB = aggiungere una entry in `REGISTRY`. **Nessun altro file va modificato.**
 
 ### Struttura di ogni entry
 
@@ -113,23 +72,12 @@ Aggiungere un nuovo DB collaterale = aggiungere una entry in `REGISTRY`.
     "pattern": str,              # regex per riconoscere il codice nell'input utente
     "label": str,                # etichetta human-readable
     "match_mode": str,           # "exact" | "prefix"
-    "display_code_field": str,   # (opzionale) se presente, il chunk_text include
-                                 # il codice e l'indentazione gerarchica dal campo "indent"
-    "source": dict,              # configurazione fonte (vedi sezione 7)
+    "display_code_field": str,   # (opzionale) chunk_text include codice + gerarchia (indent)
+    "links_to": str,             # (opzionale) i text_value di questa entry sono codici
+                                 # dell'entry con questo id — usato per correlation graph
+    "source": dict,              # configurazione fonte (celex_field | static_celex)
 }
 ```
-
-### Campo `display_code_field` (opzionale)
-
-Se presente, `lookup_collateral()` formatta il `chunk_text` come:
-
-```
-{indent_spazi}{codice_numerico}  {testo}
-```
-
-- Il valore del campo (es. `goods_code = "8544000000 80"`) viene estratto con `.split()[0]`
-- L'indentazione è calcolata dal campo `indent` della riga: `null`→0, `"-"`→2 spazi, `"- -"`→4 spazi, ecc.
-- Usato per tabelle con struttura gerarchica (es. `nomenclature`)
 
 ### Entry attive
 
@@ -143,9 +91,7 @@ REGISTRY = [
         "pattern": r"\b[0-9][A-Z][0-9]{3}\b",   # es. 2B002
         "label": "Bene a duplice uso",
         "match_mode": "exact",
-        "source": {
-            "type": "celex_field",
-        },
+        "source": {"type": "celex_field"},
     },
     {
         "id": "nomenclature",
@@ -155,7 +101,7 @@ REGISTRY = [
         "pattern": r"\b\d{4,10}\b",              # es. 8544
         "label": "Nomenclatura Combinata",
         "match_mode": "prefix",
-        "display_code_field": "goods_code",      # codice + gerarchia visiva
+        "display_code_field": "goods_code",
         "source": {
             "type": "static_celex",
             "celex": "31987R2658",
@@ -168,10 +114,11 @@ REGISTRY = [
         "table": "dual_use_correlations",
         "code_field": "cn_codes_2026",
         "text_field": "dual_use_codification",
-        "pattern": r"\b\d{4,10}\b",              # stesso pattern di nomenclature → multi-match
+        "pattern": r"\b\d{4,10}\b",              # stesso di nomenclature → multi-match per NC
         "label": "Dual Use Correlations",
         "match_mode": "prefix",
-        "display_code_field": "cn_codes_2026",   # mostra "8704229100  9A115b"
+        "display_code_field": "cn_codes_2026",
+        "links_to": "dual_use",                  # i text_value sono codici DU → correlation graph
         "source": {
             "type": "static_celex",
             "celex": "32021R0821",
@@ -182,99 +129,79 @@ REGISTRY = [
 ]
 ```
 
-Note:
-- `dual_use_correlations` e `nomenclature` condividono il pattern `\b\d{4,10}\b`: una query con codice NC (es. `8544`)
-  produce **due match** e viene eseguito `lookup_collateral` su entrambe le tabelle.
-- Ogni riga di `dual_use_correlations` è una coppia `cn_codes_2026 (10 cifre) → dual_use_codification`.
-- La struttura `{codice NC}  {codice DU}` è resa visibile grazie a `display_code_field: "cn_codes_2026"`.
-
-### Multi-match
-
-`detect_code_from_registry()` scansiona **tutti** i pattern in ordine e restituisce **tutti i match**
-(non si ferma al primo). Due entry con lo stesso pattern (es. `nomenclature` e `dual_use_correlations`,
-entrambe con `\b\d{4,10}\b`) vengono restituite entrambe e processate in sequenza.
-
-L'ordine rimane significativo: `dual_use` precede `nomenclature` per garantire che codici come `2B002`
-(che NON contiene ≥4 cifre consecutive) matchino solo `dual_use` e non producano multi-match.
+**Multi-match**: `dual_use_correlations` e `nomenclature` condividono `\b\d{4,10}\b` → una query con codice NC produce due match e viene eseguito `lookup_collateral` su entrambe.
 
 ---
 
 ## 5. Mappa dei file
 
 ```
-CustomsAI/
-├── main.py              # Pipeline orchestratore: query() + run() (wrapper CLI)
-├── app.py               # Interfaccia web Streamlit (chiama query() direttamente)
-├── config.py            # Env vars, costanti (modelli, TOP_K, MAX_CONTEXT_CHARS)
-├── registry.py          # REGISTRY + detect_code_from_registry() ← unico punto di config
-├── retrieval.py         # Primitivi DB: detect_intent(), lookup_collateral(), vector_search()
-├── prompt.py            # Context builder + system prompt (codice diretto / interpretativo)
-├── llm.py               # Chiamata LLM
-├── embeddings.py        # Generazione embedding (OpenAI)
-├── query_normalizer.py  # Normalizzazione query per embedding (deterministico)
-├── supabase_rpc.sql     # Funzione search_chunks_multi_type (deploy su Supabase)
-│
-├── tools/
-│   ├── scan_db.py       # Scanner automatizzato: valida registry + profila nuove tabelle
-│   └── catalog.sql      # Funzioni RPC Supabase per introspezione (deploy una volta sola)
-│
-└── tests/
-    ├── test_registry.py      # L1 – pattern matching, struttura REGISTRY
-    ├── test_intent.py        # L1 – keyword detection
-    ├── test_sources.py       # L1 – fonti celex_field e static_celex
-    ├── test_retrieval.py     # L2 – lookup_collateral e vector_search (mock Supabase)
-    ├── test_pipeline.py      # L3 – run() end-to-end (tutto mockato)
-    └── test_scan_db.py       # L1 – funzioni pure di scan_db.py
-```
+main.py              # Pipeline: query() → QueryResult, run() (CLI wrapper)
+                     #   + _format_eurlex_text() formatter EUR-Lex
+                     #   + _extract_linked_codes(), _build_correlation_preamble()
+app.py               # Interfaccia web Streamlit
+config.py            # Env vars, costanti (modelli, TOP_K, MAX_CONTEXT_CHARS)
+registry.py          # REGISTRY + detect_code_from_registry() ← unico punto di config
+retrieval.py         # detect_intent(), lookup_collateral(), vector_search(),
+                     #   get_annex_chunks_by_codes()
+prompt.py            # Context builder + system prompts (DISCLAIMER, ANALYTICAL, standard)
+llm.py               # Chiamata LLM
+embeddings.py        # Generazione embedding (OpenAI)
+query_normalizer.py  # Normalizzazione query per embedding
+supabase_rpc.sql     # Funzione search_chunks_multi_type (deploy su Supabase)
 
-File **non modificare** senza motivo: `structured_lookup.py` (deprecato, non usato dalla pipeline).
+tools/
+  scan_db.py         # Scanner automatizzato: valida registry + profila nuove tabelle
+  catalog.sql        # Funzioni RPC Supabase per introspezione
+
+tests/               # 120 test su 6 file (L1 unit, L2 mock, L3 e2e)
+```
 
 ---
 
 ## 6. Pipeline obbligatoria
 
-### Funzione `query(question) -> QueryResult`
+### `query(question) -> QueryResult`
 
-Tutta la logica computazionale è in `query()`. Nessun print al suo interno:
-i messaggi di routing vanno in `result["log"]`. Usata da CLI (`run()`) e Streamlit (`app.py`).
+Tutta la logica computazionale è in `query()`. Nessun print: i messaggi di routing vanno in `result["log"]`.
 
 ```
-query(question: str) -> QueryResult
+query(question)
   ↓
-  detect_intent (keyword-based, deterministico)              → retrieval.py
-  ↓
-  detect_code_from_registry (scan tutti i pattern REGISTRY)  → registry.py
-  │  Restituisce list[tuple[dict, str]] — tutti i match
+  detect_intent (keyword)          → retrieval.py
+  detect_code_from_registry        → registry.py  →  list[tuple[dict, str]]
   │
-  ├─ Match trovati (es. [nomenclature/"8544", dual_use_correlations/"8544"])
-  │   ├─ intent = CODE_SPECIFIC
-  │   │       → for entry, code in registry_matches:
-  │   │             lookup_collateral(entry, code)            → retrieval.py
-  │   │             (traccia active_entries solo se > 0 risultati)
-  │   │       → se almeno 1 risultato: QueryResult(mode="direct", chunks=..., sources=...)
-  │   │       → se tutto vuoto: fallback vector search
-  │   │
-  │   └─ intent = PROCEDURAL
-  │           → for entry, code in registry_matches:
-  │                 lookup_collateral(entry, code)            → retrieval.py
-  │           → vector_search(embedding)                      → retrieval.py
-  │           → combined context → LLM INTERPRETATIVO
-  │           → QueryResult(mode="llm", answer=..., sources=...)
+  ├─ CODE_SPECIFIC (codice trovato, no keyword procedurale)
+  │       for entry, code in registry_matches:
+  │           lookup_collateral(entry, code)
+  │       → mode="direct" (nessun LLM)
+  │       → se vuoto: fallback GENERIC
   │
-  └─ Nessun match (registry_matches = [])
-      ├─ intent = CLASSIFICATION
-      │       → vector_search(embedding, ["ANNEX_CODE"])      → retrieval.py
-      │       → se vuoto: fallback global vector search
-      │       → LLM INTERPRETATIVO
-      │       → QueryResult(mode="llm", ...)
-      │
-      └─ intent = GENERIC
-              → vector_search(embedding)                      → retrieval.py
-              → LLM INTERPRETATIVO
-              → QueryResult(mode="llm", ...)
+  ├─ PROCEDURAL (codice trovato + keyword procedurale)
+  │       for entry, code in registry_matches:
+  │           lookup_collateral(entry, code)
+  │       _extract_linked_codes() → linked DU codes (entries con links_to)
+  │       se linked_codes:
+  │           get_annex_chunks_by_codes(linked_codes)   [Opzione A]
+  │           vector_search(embedding DU-focused)        [Opzione B]
+  │           analytical=True → SYSTEM_PROMPT_ANALYTICAL
+  │       altrimenti:
+  │           vector_search(query_embedding)
+  │       _build_correlation_preamble() → preamble contesto NC→DU
+  │       LLM con combined context + preamble
+  │       answer += DISCLAIMER
+  │       → mode="llm"
+  │
+  ├─ CLASSIFICATION (keyword classificazione, no codice)
+  │       vector_search(embedding, ["ANNEX_CODE"])
+  │       → se vuoto: fallback global
+  │       LLM → mode="llm"
+  │
+  └─ GENERIC
+          vector_search(query_embedding)
+          LLM → mode="llm"
   ↓
-  _build_sources(chunks, active_entries) → list[dict]        → main.py
-    (fonti costruite in modo puro, nessun print)
+  _build_sources(chunks, active_entries) → list[dict]
 ```
 
 ### `QueryResult` (TypedDict)
@@ -282,155 +209,159 @@ query(question: str) -> QueryResult
 ```python
 class QueryResult(TypedDict):
     mode:    str          # "direct" | "llm" | "empty"
-    intent:  str          # valore dell'Intent enum (es. "code_specific")
-    codes:   list[str]    # codici rilevati (es. ["8544"])
-    dbs:     list[str]    # ID entry con ≥1 risultato (es. ["nomenclature"])
-    chunks:  list[dict]   # raw chunks
-    answer:  str | None   # risposta LLM (solo mode="llm")
+    intent:  str
+    codes:   list[str]
+    dbs:     list[str]    # ID entry con ≥1 risultato
+    chunks:  list[dict]
+    answer:  str | None
     sources: list[dict]   # [{"label": str|None, "celex": str, "url": str}]
-    log:     list[str]    # messaggi di routing/debug
-```
-
-### Wrapper CLI `run(question)`
-
-```
-run(question: str) → None
-  ↓
-  query(question) → QueryResult
-  ↓
-  stampa result["log"]
-  ↓
-  mode="direct"  → _display_direct_text(chunks)
-  mode="llm"     → stampa answer
-  mode="empty"   → "Nessun risultato trovato." + sys.exit(0)
-  ↓
-  _render_sources(result["sources"])
+    log:     list[str]
 ```
 
 ---
 
 ## 7. Regole di routing
 
-### 7.1 Rilevamento codice
+### Rilevamento codice
 
-`detect_code_from_registry(query)` in `registry.py`:
-- Scansiona **tutti** i pattern in `REGISTRY` in ordine
-- Pattern compilati con `re.IGNORECASE`
-- Il codice è normalizzato in **UPPERCASE** prima del lookup
-- Restituisce `list[tuple[dict, str]]` — lista di `(entry, codice)` per ogni match, oppure `[]`
+`detect_code_from_registry(query)` scansiona **tutti** i pattern (re.IGNORECASE), normalizza in UPPERCASE,
+restituisce `list[tuple[dict, str]]`. La pipeline itera su tutti i match.
 
-La pipeline in `main.py` itera su tutti i match:
-```python
-registry_matches = detect_code_from_registry(q)   # list[tuple[dict, str]]
-for entry, code in registry_matches:
-    results = retrieval.lookup_collateral(entry, code)
-    ...
-```
-
-È vietato:
-- Hardcodare pattern di codice in `retrieval.py`, `main.py` o qualsiasi altro file
-- Aggiungere branch `if/else` per tipo di codice fuori dal registry
-
-### 7.2 Intent detection
-
-`detect_intent(query)` in `retrieval.py` — solo keyword matching, nessuna logica su codici:
+### Intent detection
 
 | Intent | Trigger | Retrieval |
 |---|---|---|
-| `code_specific` | codice presente + nessuna keyword procedurale | solo DB collaterale |
-| `procedural` | codice + "esportare", "obblighi", "cosa devo fare", "procedura", "autorizzazione" | DB collaterale + chunks |
-| `classification` | "che codice", "voce doganale", "classificazione" | chunks (ANNEX_CODE filter) |
-| `generic` | nessuna delle precedenti | chunks (global vector) |
+| `code_specific` | codice presente + no keyword procedurale | solo DB collaterale |
+| `procedural` | codice + "esportare", "obblighi", "cosa devo fare", "procedura", "autorizzazione" | collaterale + annex + vector |
+| `classification` | "che codice", "voce doganale", "classificazione" | chunks ANNEX_CODE |
+| `generic` | default | chunks global |
 
-Regola di override in `main.py`:
-- Se codice rilevato + intent ≠ PROCEDURAL → intent diventa CODE_SPECIFIC
-- Se codice rilevato + intent = PROCEDURAL → rimane PROCEDURAL
+Override in `main.py`: codice trovato + intent ≠ PROCEDURAL → intent diventa CODE_SPECIFIC.
 
-### 7.3 Fallback
+### Fallback
 
-- CODE_SPECIFIC senza risultati collaterali → fallback GENERIC (vector search globale)
+- CODE_SPECIFIC senza risultati → fallback GENERIC
 - CLASSIFICATION senza risultati filtrati → fallback global vector search
 
 ---
 
-## 8. Fonti normative
+## 8. Correlation graph (Fase 3)
 
-Le fonti sono costruite deterministicamente da `_build_sources()` e mai generate dall'LLM.
+### `_extract_linked_codes(registry_matches, collateral_results) -> list[str]`
 
-### Helper per le fonti
+Estrae i codici "linked" dai risultati collaterali delle entry con `links_to`.
+Non contiene logica hardcoded: legge `links_to` dal registry.
 
-**`_build_sources(chunks, active_entries) -> list[dict]`** — funzione pura, nessun print.
-Restituisce lista di dict `{"label": str|None, "celex": str, "url": str}`.
+Esempio: `dual_use_correlations` ha `links_to="dual_use"` → i `text_value` dei suoi risultati
+sono codici DU (es. `"3E001"`) da usare per annex lookup e analytical embedding.
 
-**`_render_sources(sources: list[dict])`** — stampa nel formato testuale standard.
-Usata da `run()`.
+### `_build_correlation_preamble(registry_matches, collateral_results) -> str`
 
-**`_print_normative_sources(chunks, registry_entries)`** — firma invariata (backward compat.
-per `test_sources.py`). Internamente chiama `_build_sources + _render_sources`.
-
-In Streamlit (`app.py`) le fonti sono rese come link Markdown cliccabili, iterando `result["sources"]`.
-
-### `celex_field`
-La fonte è letta dal campo `celex_consolidated` della riga restituita.
-Usato per: `dual_use_items`, `chunks`.
-Link generato: `https://eur-lex.europa.eu/legal-content/IT/TXT/?uri=CELEX:{celex}`
-
-### `static_celex`
-La fonte è fissa, definita nel registry.
-Usato per: `nomenclature` e futuri DB senza CELEX dinamico per riga.
-Richiede: `celex`, `url`, `label` nell'entry del registry.
-
-### Output
+Costruisce un riepilogo testuale delle correlazioni NC→DU da includere nel contesto LLM:
 
 ```
----
-FONTI NORMATIVE (deterministiche)
-
-Nomenclatura Combinata (Reg. CEE 2658/87)    ← solo se static_celex E ha prodotto risultati
-CELEX: 31987R2658
-https://eur-lex.europa.eu/...
-
-CELEX: 02021R0821                            ← da chunks (celex_field)
-https://eur-lex.europa.eu/...
-
----
+CORRELAZIONI RILEVATE NEL DATABASE:
+- NC 8544300000 → Dual Use Correlations: 3E001
 ```
 
-I due tipi non sono esclusivi: in un routing PROCEDURAL con codice, entrambi possono comparire.
+### Modalità Analytical
 
-### Regola `active_entries`
+Attivata automaticamente se `linked_codes` è non vuoto (intent PROCEDURAL + correlazioni trovate).
 
-`_build_sources(chunks, active_entries)` riceve solo le entry che hanno prodotto
-**almeno un risultato** dal lookup collaterale. Le entry con 0 risultati non vengono incluse
-e la loro fonte non compare — anche se il loro pattern ha matchato la query.
-
-Esempio: query `8708` → `nomenclature` restituisce 15 risultati, `dual_use_correlations` ne restituisce 0
-→ solo la fonte `Nomenclatura Combinata` compare nel footer.
+- **Opzione A** (`get_annex_chunks_by_codes`): recupera i chunk `ANNEX_CODE` dai `chunks` filtrando
+  per `metadata->>code` = codice DU. Dà la definizione normativa esatta dell'allegato dual-use.
+- **Opzione B** (vector search): embedding costruito sui codici DU (`"obblighi autorizzazione esportazione {du_codes}"`),
+  non sul codice NC, per evitare che il vettore punti verso la nomenclatura.
+- Usa `SYSTEM_PROMPT_ANALYTICAL` → risposta strutturata articolo per articolo.
 
 ---
 
-## 9. Regole per il prompt LLM
+## 9. EUR-Lex text formatter
 
-### Modalità Codice Diretto
-- Attiva quando intent=`code_specific`
-- Riproduzione fedele del testo
-- Nessuna sintesi, interpretazione o sezione aggiuntiva
+`_format_eurlex_text(text: str) -> str` in `main.py`.
 
-### Modalità Interpretativa
-- Attiva quando intent=`procedural`, `classification`, `generic`
-- Sintesi strutturata con citazioni
-- Nessuna deduzione esterna
+Converte il plain text EUR-Lex (allegati dual-use) in markdown multilivello. Best-effort (~85% accuratezza
+su strutture profonde). Il testo originale è sempre disponibile nell'expander Streamlit.
+
+### Livelli
+
+| Marcatore | Output |
+|-----------|--------|
+| `a.` `b.` (livello 1) | `- **a.** testo` |
+| `1.` `2.` (livello 2) | `  - **1.** testo` |
+| `a.` `b.` (livello 3) | `    - **a.** testo` |
+| `1.` `2.` (livello 4) | `      - **1.** testo` |
+| `—` (em dash) | `  - testo` |
+| `e` / `o` su riga propria | connettore inline: `testo; **e**` |
+| `Note tecniche:` / `N.B.` | intestazione in corsivo `*Note tecniche:*` |
+| testo sotto Note/N.B. | corsivo `*testo*` |
+| numerati dentro Note | `  *1. testo*` |
+
+### Helper
+
+- `_is_list_marker(line)` — True se la riga è `a.`, `1.` o `—`
+- `_is_section_break(line)` — True se `_is_list_marker` OPPURE intestazione nota (`Note tecniche`, `N.B.`, ecc.)
+  Usato in tutti i loop di raccolta testo per fermarsi correttamente.
+
+### Stato interno
+
+`depth`, `next_d1`, `next_d3`, `last_text`, `in_note`, `connector`
+
+La profondità di una lettera è determinata dal contesto (profondità precedente + indice lettera).
+Euristiche: `last_text.endswith(':')` segnala che il livello successivo scende di profondità.
+
+### Dual rendering in Streamlit (app.py)
+
+Per `mode="direct"`:
+```python
+st.markdown(_format_eurlex_text(raw))           # formattato markdown
+with st.expander("Testo originale EUR-Lex"):
+    st.code(raw, language=None)                 # originale monospace
+```
+
+---
+
+## 10. Fonti normative
+
+### Helper
+
+- `_build_sources(chunks, active_entries) -> list[dict]` — funzione pura.
+- `_render_sources(sources)` — stampa testuale standard, usata da `run()`.
+- `_print_normative_sources(chunks, registry_entries)` — firma invariata (compat. `test_sources.py`).
+
+### Tipi
+
+- `celex_field` — fonte letta da `celex_consolidated` della riga (chunks, dual_use_items).
+- `static_celex` — fonte fissa dal registry (nomenclature, dual_use_correlations).
+
+`active_entries` = solo le entry con ≥1 risultato. Le fonti delle entry vuote non compaiono.
+
+---
+
+## 11. Prompt LLM
+
+### Tre modalità
+
+| Modalità | Attiva quando | Sistema |
+|----------|---------------|---------|
+| Codice Diretto | intent=code_specific | `SYSTEM_PROMPT_CODICE_DIRETTO` — fedele, no sintesi |
+| Interpretativa | intent=procedural/classification/generic | `SYSTEM_PROMPT` — strutturata |
+| Analytical | PROCEDURAL + linked_codes trovati | `SYSTEM_PROMPT_ANALYTICAL` — articolo per articolo |
+
+### DISCLAIMER
+
+Costante in `prompt.py`, appesa a tutte le risposte `mode="llm"`:
+> Le informazioni riportate sono generate automaticamente … non costituiscono consulenza legale …
 
 ### Regole assolute
 
-- L'LLM non può generare CELEX autonomamente
-- Le fonti normative non devono essere generate dall'LLM
-- Le fonti sono stampate solo dal codice Python
-- Il context builder (`prompt.py`) deve accettare qualsiasi schema di metadata, senza assumere campi fissi
+- L'LLM non genera CELEX né fonti normative
+- Il context builder accetta qualsiasi schema di metadata, senza assumere campi fissi
+- `format_context(chunks, preamble="")` accetta preamble opzionale (es. correlazioni NC→DU)
 
 ---
 
-## 10. Supabase RPC
+## 12. Supabase RPC
 
 ### `search_chunks_multi_type` (attiva)
 
@@ -438,253 +369,128 @@ Esempio: query `8708` → `nomenclature` restituisce 15 risultati, `dual_use_cor
 search_chunks_multi_type(
   query_embedding vector(1536),
   match_count     int,
-  type_filters    text[] default null   -- es. ARRAY['ARTICLE'], ARRAY['ANNEX_CODE']
+  type_filters    text[] default null   -- es. ARRAY['ANNEX_CODE']
 )
 ```
 
-- `type_filters = null` → ricerca globale su tutti i tipi
-- Il confronto su `unit_type` è case-insensitive (`upper()`)
-- Definita in `supabase_rpc.sql` — rideployare se si modifica il file
+`type_filters=null` → ricerca globale. Filtro su `unit_type` (colonna, non metadata). Definita in `supabase_rpc.sql`.
 
-### Funzioni catalog (per `tools/scan_db.py`)
+### Catalog functions (`tools/catalog.sql`)
 
-Definite in `tools/catalog.sql` — deployare **una volta sola**:
-
-- `list_public_tables()` → tabelle pubbliche + stima righe
-- `get_table_columns(p_table)` → colonne con tipo e nullability
-- `sample_column_values(p_table, p_column, p_limit)` → valori distinti (anti-injection via `format()/%I`)
+Deploy una volta sola: `list_public_tables()`, `get_table_columns(p_table)`, `sample_column_values(p_table, p_col, p_limit)`.
 
 ---
 
-## 11. Scanner automatizzato (`tools/scan_db.py`)
-
-Strumento per validare il registry esistente e profilare nuove tabelle.
-
-### Utilizzo
+## 13. Scanner automatizzato (`tools/scan_db.py`)
 
 ```bash
-python3 tools/scan_db.py              # report completo (testo)
+python3 tools/scan_db.py              # report completo
 python3 tools/scan_db.py --check-only # solo validazione registry
 python3 tools/scan_db.py --json       # output JSON
-python3 tools/scan_db.py --json --output report.json
-python3 tools/scan_db.py --skip-tables t1,t2
 ```
 
-### Prerequisito
+**Validazione registry** (6 check per entry): tabella esiste, campi presenti, dati non vuoti,
+pattern coverage ≥80%, lookup campione, consistenza fonte.
 
-Deployare `tools/catalog.sql` su Supabase prima del primo utilizzo.
-
-### Cosa fa
-
-**Validazione registry** (per ogni entry esistente):
-1. Tabella esiste nel DB
-2. `code_field` e `text_field` presenti
-3. Dati non vuoti
-4. Pattern coverage ≥ 80% sui campioni reali
-5. Lookup di verifica con codice campione
-6. Consistenza fonte (`celex_field` o `static_celex`)
-
-**Profiling tabelle non in registry**:
-- Campiona tutte le colonne utili
-- Rileva `code_field` (pattern detection in due fasi: registry patterns → euristiche)
-- Rileva `text_field` (hint per nome, fallback lunghezza media)
-- Suggerisce `match_mode` (analisi relazioni di prefisso tra campioni)
-- Genera **draft entry pronto da incollare** in `registry.py`
-
-### Pattern detection (due fasi)
-
-**Fase 1**: controlla se i campioni matchano un pattern già nel REGISTRY (confidence 0.95)
-**Fase 2**: euristiche generali:
-- Numerici a lunghezza variabile (≥4 chars di differenza) → prefix
-- Numerici a lunghezza fissa → exact
-- Alfanumerici a lunghezza fissa → exact
-- Altrimenti → nessun pattern, ispezione manuale
+**Profiling nuove tabelle**: rileva code_field/text_field/match_mode, genera draft entry pronto per `registry.py`.
 
 ---
 
-## 12. Procedura onboarding nuovo DB
-
-Quando si aggiunge una nuova tabella Supabase a CustomsAI:
+## 14. Procedura onboarding nuovo DB
 
 ```
 1. Carica la tabella su Supabase (schema public)
-   ↓
-2. python3 tools/scan_db.py
-   → il draft entry viene stampato automaticamente
-   ↓
-3. Rivedi il draft:
-   - pattern corretto per i codici reali?
-   - match_mode giusto? (exact = atomico, prefix = gerarchico)
-   - source.celex e source.url compilati? (se static_celex)
-   - serve display_code_field? (se la tabella ha codici + gerarchia visiva)
-   ↓
-4. Aggiungi l'entry in REGISTRY (registry.py)
-   ↓
-5. python3 tools/scan_db.py --check-only  → tutti ✅?
-   ↓
-6. python3 -m pytest tests/ -v            → tutti passed?
-   ↓
-7. python3 main.py "tuo codice di test"   → output corretto?
+2. python3 tools/scan_db.py  →  draft entry stampato automaticamente
+3. Rivedi: pattern, match_mode, source, display_code_field, links_to (se applicabile)
+4. Aggiungi entry in REGISTRY (registry.py)
+5. python3 tools/scan_db.py --check-only  →  tutti ✅?
+6. python3 -m pytest tests/ -v            →  tutti passed?
+7. python3 main.py "tuo codice di test"   →  output corretto?
 ```
 
 **Nessun altro file da modificare oltre a `registry.py`.**
 
 ---
 
-## 13. Suite di test
+## 15. Suite di test (120 test)
 
 ```
-tests/
-├── test_registry.py   L1 – struttura REGISTRY, pattern dual-use/NC/correlations,
-│                           multi-match (8544 → 2 entry), case-insensitive
-├── test_intent.py     L1 – keyword detection, priorità PROCEDURAL > CLASSIFICATION
-├── test_sources.py    L1 – fonti celex_field/static_celex, deduplicazione, output vuoto
-├── test_retrieval.py  L2 – lookup_collateral (exact/prefix/display_code), vector_search (mock)
-├── test_pipeline.py   L3 – run() end-to-end: 9 scenari (code_specific dual-use/NC,
-│                           multi-match NC con DU-correlations vuoto, fallback,
-│                           procedural+code, generic, classification, no results)
-└── test_scan_db.py    L1 – detect_pattern, detect_match_mode, _match_registry_patterns,
-                            ScanResult.status, render_json/text, _draft_dict
+test_registry.py   L1 – struttura REGISTRY, pattern, multi-match, case-insensitive
+test_intent.py     L1 – keyword detection, priorità PROCEDURAL
+test_sources.py    L1 – fonti celex_field/static_celex, deduplicazione, output vuoto
+test_retrieval.py  L2 – lookup_collateral (exact/prefix/display_code), vector_search (mock)
+test_pipeline.py   L3 – run() end-to-end: 9 scenari
+test_scan_db.py    L1 – funzioni pure scan_db.py
 ```
-
-Eseguire prima di ogni modifica al registry o al retrieval:
 
 ```bash
 python3 -m pytest tests/ -v
 ```
 
-I test di struttura (`test_registry.py`) verificano automaticamente ogni nuova entry del registry.
-
----
-
-## 14. Logging obbligatorio
-
-**In `query()`** i messaggi di routing non vengono stampati ma accumulati in `result["log"]`:
-- `[routing] intent=… | code=… | db=…`
-- `[routing] nessun risultato collaterale → fallback vector search`
-- `[normalization] embedding query: …`
-- `[routing] nessun risultato con filtri=… → fallback global`
-
-**In `retrieval.py`** i messaggi vengono stampati direttamente su stdout (visibili sia in CLI che in Streamlit su terminale):
-- `[collateral] {id} | {match_mode} '{code}' → N risultati`
-- `[vector] type_filters=… → N risultati`
-
-**In `run()`** i messaggi di `result["log"]` vengono stampati prima della risposta.
-
-**In `app.py`** i messaggi di `result["log"]` vengono mostrati in un expander "Routing" (collassato).
-
----
-
-## 15. Limiti di contesto
-
-Se il contesto supera `MAX_CONTEXT_CHARS` (default: 30000):
-
-- `llm.generate_answer()` lancia `ValueError`
-- `main.py` cattura l'eccezione, stampa messaggio chiaro ed esce
-- Soluzione: ridurre `TOP_K` o aumentare `MAX_CONTEXT_CHARS` in `.env`
-
 ---
 
 ## 16. Cosa è vietato
 
-❌ pattern di codice hardcoded fuori dal registry
-❌ branch `if/else` per tipo di codice fuori dal registry
+❌ Pattern di codice hardcoded fuori dal registry
+❌ Branch `if/else` per tipo di codice fuori dal registry
 ❌ CELEX hardcoded nel codice (solo nel registry per fonti statiche)
 ❌ LLM che genera CELEX o fonti normative
-❌ classificazione automatica
-❌ reasoning predittivo
-❌ confronto versioni consolidate
-❌ logica che assume un numero fisso di DB collaterali
-❌ modifica di file diversi da `registry.py` per aggiungere un nuovo DB
+❌ Classificazione automatica o reasoning predittivo
+❌ Logica che assume un numero fisso di DB collaterali
+❌ Modificare file diversi da `registry.py` per aggiungere un nuovo DB
 
 ---
 
 ## 17. Criteri di validazione
 
-La versione è valida se:
-
-✔ `python3 -m pytest tests/ -v` → tutti passed
+✔ `python3 -m pytest tests/ -v` → tutti passed (120)
 ✔ `python3 tools/scan_db.py --check-only` → tutti ✅
-✔ Lookup dual-use funziona (exact match, fonti celex_field)
-✔ Lookup nomenclatura NC funziona (prefix match, gerarchia con codici, fonti static_celex)
-✔ Vector retrieval su chunks funziona
-✔ Routing procedurale con codice combina DB collaterale + chunks
-✔ Aggiungere un nuovo DB = solo una entry in `registry.py`
-✔ Nessuna hallucination normativa
-✔ `python3 main.py "domanda"` → output CLI identico alla versione precedente
-✔ `python3 -m streamlit run app.py` → UI aperta in browser, query funzionante
+✔ Lookup dual-use: exact match, fonti celex_field
+✔ Lookup NC: prefix match, gerarchia con codici, fonti static_celex
+✔ PROCEDURAL con codice NC correlato DU: analytical mode, preamble correlazioni, DISCLAIMER
+✔ EUR-Lex formatter: Note tecniche in corsivo, livelli gerarchici
+✔ Streamlit: dual rendering (markdown + expander originale)
+✔ Aggiungere un nuovo DB = solo `registry.py`
 
 ---
 
 ## 18. Filosofia
 
-Prima stabilità.
-Poi sofisticazione.
+Prima stabilità. Poi sofisticazione.
 
-CustomsAI evolve per fasi controllate:
-
-Fase 1 – Retrieval stabile su chunks ✅
-Fase 2 – Registry multi-DB + retrieval unificato ✅
-Fase 2b – Interfaccia web Streamlit (`app.py`) ✅
-Fase 3 – Motore decisionale
-Fase 4 – Reasoning normativo avanzato
-
-Ogni fase deve essere validata prima di evolvere.
+```
+Fase 1  – Retrieval stabile su chunks                          ✅
+Fase 2  – Registry multi-DB + retrieval unificato              ✅
+Fase 2b – Interfaccia web Streamlit                            ✅
+Fase 3  – Correlation graph + formatter EUR-Lex + analytical   ✅ (parziale)
+Fase 4  – Reasoning normativo avanzato
+```
 
 ---
 
 ## 19. Changelog
 
-### v6 (corrente)
-- **`query(question) -> QueryResult`**: estratta da `run()`. Tutta la logica computazionale
-  senza print. I messaggi di routing accumulati in `result["log"]`. Usata da CLI e Streamlit.
-- **`QueryResult`** TypedDict: `mode, intent, codes, dbs, chunks, answer, sources, log`.
-- **`_build_sources(chunks, active_entries) -> list[dict]`**: funzione pura per costruire le fonti.
-- **`_render_sources(sources)`**: stampa le fonti nel formato standard. Usata da `run()`.
-- **`_print_normative_sources`**: firma invariata (backward compat.), delega a `_build_sources + _render_sources`.
-- **`_run_llm_and_print`**: rimossa (logica spostata in `query()`).
-- **`app.py`**: nuova interfaccia web Streamlit. Avvio: `python3 -m streamlit run app.py`.
-  Form input, spinner, expander routing, testo/risposta/fonti cliccabili, storico sessione.
-- **`requirements.txt`**: aggiunto `streamlit>=1.30.0`.
-- Suite di test: 120 test — nessuna regressione.
+### v7 (corrente)
+- **Correlation graph** (Fase 3): `links_to` nel registry, `_extract_linked_codes()`,
+  `_build_correlation_preamble()` in `main.py`.
+- **Annex lookup** (`retrieval.py`): `get_annex_chunks_by_codes(codes)` — query diretta
+  su `metadata->>code` per definizioni normative esatte dei codici DU collegati.
+- **Analytical mode**: PROCEDURAL + linked_codes → embedding DU-focused (no deriva NC),
+  `SYSTEM_PROMPT_ANALYTICAL` (struttura articolo per articolo), `analytical=True` in `llm.py`.
+- **DISCLAIMER**: costante in `prompt.py`, appeso automaticamente a tutte le risposte `mode="llm"`.
+- **EUR-Lex formatter** `_format_eurlex_text()` in `main.py`: state machine best-effort,
+  livelli a./b./1./2./—, Note tecniche/N.B. in corsivo, `_is_section_break()` per terminazione corretta.
+- **Dual rendering Streamlit**: `mode="direct"` → markdown formattato + expander originale monospace.
+- `metadata["text_value"]` aggiunto in `lookup_collateral()` per tracciabilità del valore raw.
+- Suite di test: 120 test, nessuna regressione.
+
+### v6
+- `query(question) -> QueryResult` estratta da `run()`. Logica senza print, routing in `result["log"]`.
+- `QueryResult` TypedDict: `mode, intent, codes, dbs, chunks, answer, sources, log`.
+- `_build_sources()` funzione pura. `_render_sources()` per CLI. `app.py` Streamlit.
+- Suite di test: 120 test.
 
 ### v5
-- **Multi-match registry**: `detect_code_from_registry()` restituisce ora `list[tuple[dict, str]]`
-  con tutti i match (non solo il primo). La pipeline itera su ogni match per `lookup_collateral`.
-- **Nuova entry**: `dual_use_correlations` (`cn_codes_2026 → dual_use_codification`, prefix match,
-  CELEX 32021R0821). Condivide il pattern `\b\d{4,10}\b` con `nomenclature` → multi-match per codici NC.
-- **`display_code_field` su `dual_use_correlations`**: l'output mostra `"8704229100  9A115b"`
-  invece del solo codice DU, rendendo visibile il mapping NC → DU.
-- **`active_entries`**: `_print_normative_sources` riceve solo le entry che hanno prodotto ≥1
-  risultato. Le fonti delle entry con 0 risultati non compaiono nel footer (es. 8708 non ha
-  correlazioni DU → fonte Reg. 2021/821 non stampata).
-- Suite di test: 120 test (aggiunto `test_code_specific_nc_partial_match_no_du_source` e
-  `test_nomenclature_code_also_matches_dual_use_correlations`).
-
-### v4
-- Implementato registry-first completo: `registry.py` con `detect_code_from_registry()`
-- `retrieval.py` riscritto: rimossi pattern hardcoded, aggiunti `lookup_collateral()` e `vector_search()`
-- `main.py` riscritto: routing a due variabili (intent + code), `_print_normative_sources()` gestisce `celex_field` e `static_celex`
-- Aggiunto `display_code_field` per visualizzazione codice + gerarchia (es. nomenclature)
-- Aggiornato `supabase_rpc.sql`: funzione `search_chunks_multi_type` con `vector(1536)` e `type_filters`
-- Aggiunto `tools/scan_db.py`: scanner automatizzato con validazione registry e profiling nuove tabelle
-- Aggiunto `tools/catalog.sql`: 3 funzioni RPC Supabase per introspezione
-- Suite di test progressiva: 119 test su 6 file (L1 unit, L2 mock, L3 e2e)
-- Formalizzata procedura onboarding nuovo DB (7 passi, solo `registry.py` da modificare)
-- Fase 2 completata
-
-### v3
-- Introdotto registry config-driven per DB collaterali
-- Aggiunta tabella `nomenclature` (NC, CELEX 31987R2658, prefix match)
-- Formalizzata tabella `dual_use_items` come DB collaterale (exact match)
-- Pipeline aggiornata: routing a due variabili (codice + intent)
-- Fonti: due tipi (`celex_field`, `static_celex`)
-- Vietato hardcoding di pattern e tabelle fuori dal registry
-
-### v2
-- Riallineato le regole allo stato reale del sistema
-- Eliminato incoerenze della fase 1
-- Formalizzato hybrid retrieval
-- Formalizzato separazione fonti
-- Bloccato logiche dominio-specifiche
-- Preparato terreno per fase 2
+- Multi-match registry: `detect_code_from_registry()` → `list[tuple[dict, str]]`.
+- Nuova entry `dual_use_correlations`. `display_code_field` su correlations.
+- `active_entries`: fonti solo per entry con ≥1 risultato.

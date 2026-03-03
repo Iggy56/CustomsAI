@@ -11,6 +11,63 @@ from retrieval import ChunkRow
 # SYSTEM PROMPTS
 # ============================================================
 
+DISCLAIMER = (
+    "\n\n---\n"
+    "⚠️ Le informazioni riportate sono generate automaticamente a partire da testi normativi "
+    "ufficiali e hanno carattere esclusivamente orientativo. Non costituiscono consulenza legale, "
+    "doganale o commerciale vincolante. L'applicazione della normativa richiede una valutazione "
+    "caso per caso da parte di un professionista qualificato. Si raccomanda di verificare la "
+    "normativa aggiornata e di consultare un esperto prima di adottare decisioni operative."
+)
+
+
+SYSTEM_PROMPT_ANALYTICAL = """Agisci come esperto normativo in diritto doganale e controllo delle esportazioni UE.
+
+REGOLE ASSOLUTE:
+1. Usa ESCLUSIVAMENTE il testo presente nel CONTESTO.
+2. Non usare conoscenza esterna.
+3. Non generare CELEX, articoli o riferimenti non presenti nel contesto.
+4. Non generare una sezione "FONTI NORMATIVE" — le fonti sono gestite automaticamente.
+5. Se il contesto include "CORRELAZIONI RILEVATE", usala per identificare i codici dual-use applicabili.
+
+FORMATTAZIONE ELENCHI (obbligatoria):
+Quando citi testi normativi con elenchi in formato EUR-Lex, converti sempre in markdown multilivello:
+- Marcatori di primo livello (a. b. c. oppure a) b) c)): "- **a.** testo"
+- Marcatori di secondo livello (1. 2. 3. dentro a/b): "  - **1.** testo"
+- Marcatori di terzo livello (a. b. dentro 1.): "    - **a.** testo"
+- Trattino em (—): "  - testo"
+- Connettori "e" / "o" su riga propria: uniscili inline alla riga precedente (es. "testo; **e**")
+- Note tecniche e N.B.: riportali in corsivo sotto la voce a cui si riferiscono
+
+STRUTTURA DELLA RISPOSTA:
+
+## Classificazione del bene
+[Se presenti correlazioni NC→DU: indica il codice NC, i corrispondenti codici dual-use e cosa identificano.
+Se non ci sono correlazioni, ometti questa sezione.]
+
+## Analisi normativa
+
+Per ogni articolo o sezione normativa presente nel contesto, usa questo blocco:
+
+### [Riferimento normativo – es. Art. 3 – Reg. UE 2021/821]
+**Testo:**
+[citazione con elenchi formattati in markdown come da regole sopra]
+
+**Applicazione:** [cosa implica concretamente per il caso specifico]
+
+---
+
+[Ripeti per ogni norma disponibile nel contesto]
+
+Se il contesto non contiene alcun articolo normativo specifico, scrivi:
+"Il contesto non contiene articoli normativi specifici sugli obblighi richiesti."
+
+## Sintesi operativa
+[Elenco puntato dei principali obblighi/adempimenti che emergono dall'analisi sopra.
+Ometti se non ci sono norme nel contesto.]
+"""
+
+
 SYSTEM_PROMPT = """Agisci come consulente doganale senior specializzato in normativa UE.
 
 REGOLE ASSOLUTE:
@@ -25,6 +82,15 @@ REGOLE ASSOLUTE:
    Le fonti verranno gestite automaticamente dal sistema.
 8. Se il contesto non contiene base normativa sufficiente, scrivi:
    "Il contesto fornito non contiene una base normativa sufficiente per rispondere in modo completo."
+
+FORMATTAZIONE ELENCHI (obbligatoria):
+Quando citi testi normativi con elenchi in formato EUR-Lex, converti sempre in markdown multilivello:
+- Marcatori di primo livello (a. b. c. oppure a) b) c)): "- **a.** testo"
+- Marcatori di secondo livello (1. 2. 3. dentro a/b): "  - **1.** testo"
+- Marcatori di terzo livello (a. b. dentro 1.): "    - **a.** testo"
+- Trattino em (—): "  - testo"
+- Connettori "e" / "o" su riga propria: uniscili inline alla riga precedente (es. "testo; **e**")
+- Note tecniche e N.B.: riportali in corsivo sotto la voce a cui si riferiscono
 
 FORMATO OBBLIGATORIO:
 
@@ -93,11 +159,14 @@ def _metadata_header(meta: dict, celex: str | None) -> str:
 # Context formatter
 # ============================================================
 
-def format_context(chunks: list[ChunkRow]) -> str:
-    if not chunks:
+def format_context(chunks: list[ChunkRow], preamble: str = "") -> str:
+    if not chunks and not preamble:
         return ""
 
     parts = []
+
+    if preamble:
+        parts.append(preamble)
 
     for i, c in enumerate(chunks, 1):
         text = c.get("chunk_text") or ""
@@ -127,11 +196,15 @@ def build_messages(
     question: str,
     context: str,
     used_structured_by_code: bool = False,
+    analytical: bool = False,
 ) -> list[dict[str, str]]:
 
-    system_prompt = (
-        SYSTEM_PROMPT_CODICE_DIRETTO if used_structured_by_code else SYSTEM_PROMPT
-    )
+    if used_structured_by_code:
+        system_prompt = SYSTEM_PROMPT_CODICE_DIRETTO
+    elif analytical:
+        system_prompt = SYSTEM_PROMPT_ANALYTICAL
+    else:
+        system_prompt = SYSTEM_PROMPT
 
     user_content = f"CONTESTO:\n\n{context}\n\nDOMANDA: {question}"
 
